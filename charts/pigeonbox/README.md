@@ -100,6 +100,9 @@ helm install pigeonbox pigeonbox/pigeonbox --namespace pigeonbox --create-namesp
 
 > 内置实例接线优先级高于 `config`（env 覆盖）；数据面组件继承顶层 `nodeSelector`/`tolerations`/`affinity`，离线集群需把对应镜像导入到被调度节点。
 
+> **多副本拓扑下的口径**（2026-10-22 澄清）：`replicaCount>1` 的双拓扑（public×N + admin×1）下，**core 侧的「联邦」与「设备直传」都不可用**——两者均为 standalone 专属（节点身份是进程级 Ed25519，多副本语义未定义），core 在多副本模式自动降级关闭联邦。
+> 但本组件**仍然有用**：它是 PigeonBeam（信鸽直传）的公共 rendezvous 与加密中继底座，与 core 的联邦开关无关。⇒ 想让本 Box 实例自己参与联邦或提供直传，请用单机形态，而不是指望这里的开关。
+
 ### 存储
 
 | 参数 | 说明 | 默认值 |

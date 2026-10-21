@@ -253,6 +253,16 @@ redis:
 # 口令联邦路由,内存存储无状态),同时把后端 env 注入 PB_FEDERATION_* 指向它。
 # 集群内 Service: <release>-p2p:12346;config 显式配置 federation 段时本开关让位。
 # 镜像 ghcr.io/pigeonbox/p2p 为 public,离线集群需手动导入。
+#
+# ⚠️ 多副本拓扑下的口径(2026-10-22 拍板,见 hub docs/specs/
+# 2026-10-22-usability-cs-p2p-unification-design.md 的 Q1):
+# 本 chart 的多副本形态(public×N + admin×1)下,**core 侧的「联邦」与「设备直传」
+# 都不可用** —— 两者均为 standalone 专属(节点身份是进程级 Ed25519,多副本语义
+# 未定义),core 在多副本模式会**自动降级关闭联邦**。
+# 但本组件**仍然有用**:它是 PigeonBeam(信鸽直传)的公共 rendezvous 与加密中继
+# 底座,与 core 的联邦开关无关。
+# ⇒ 想让本 Box 实例自己参与联邦/提供直传,请用单机形态(单副本 + 不启用本组件的
+# 多副本拓扑),而不是指望这里的开关。
 p2p:
   enabled: false
   image:
