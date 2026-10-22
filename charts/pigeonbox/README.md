@@ -91,17 +91,17 @@ helm install pigeonbox pigeonbox/pigeonbox --namespace pigeonbox --create-namesp
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
-| `p2p.enabled` | 部署联邦注册中心单副本（节点注册/口令联邦路由，内存存储无状态）并自动注入 `PB_FEDERATION_*`；`config.federation` 显式配置时让位。**需 server 镜像 ≥ 0.10.0**（federation 域服务在 core v0.8.0）。默认镜像 tag `0.4` 起为传输协议 v2——**直传双端（desktop/p2pc）须同版升级**，旧版客户端互传首帧失败 | `false` |
+| `p2p.enabled` | 部署联邦注册中心单副本（节点注册/口令联邦路由，内存存储无状态）并自动注入 `PB_FEDERATION_*`；`config.federation` 显式配置时让位。**需 server 镜像 ≥ 0.10.0**（federation 域服务在 core v0.8.0）。默认镜像 tag `0.4` 起为传输协议 v2——**直传双端（PigeonBeam/p2pc）须同版升级**，旧版客户端互传首帧失败 | `false` |
 | `p2p.image.*` | ghcr.io/pigeonbox/p2p（public，离线集群需导入） | `0.3` |
 | `p2p.publicURL` | 本站对外地址（取件方直连下载用）；留空自动取 `config.server.base_url` | `""` |
 | `p2p.adminPassword` | p2p 管理 API 口令；留空 = 管理 API 禁用 | `""` |
-| `p2p.relay.enabled` | 直传加密中继兜底（1.3.7+，`PB_P2P_RELAY_ENABLED`；直连失败时经中继转发） | `false` |
+| `p2p.relay.enabled` | PigeonBeam 直传加密中继兜底（1.3.7+，`PB_P2P_RELAY_ENABLED`；直连失败时经中继转发） | `false` |
 | `p2p.relay.mbps` | 中继每节点带宽上限（Mbps） | 见 values.yaml |
 
 > 内置实例接线优先级高于 `config`（env 覆盖）；数据面组件继承顶层 `nodeSelector`/`tolerations`/`affinity`，离线集群需把对应镜像导入到被调度节点。
 
-> **多副本拓扑下的口径**（2026-10-22 澄清）：`replicaCount>1` 的双拓扑（public×N + admin×1）下，**core 侧的「联邦」与「设备直传」都不可用**——两者均为 standalone 专属（节点身份是进程级 Ed25519，多副本语义未定义），core 在多副本模式自动降级关闭联邦。
-> 但本组件**仍然有用**：它是 PigeonBeam（信鸽直传）的公共 rendezvous 与加密中继底座，与 core 的联邦开关无关。⇒ 想让本 Box 实例自己参与联邦或提供直传，请用单机形态，而不是指望这里的开关。
+> **多副本拓扑下的口径**（2026-10-22 澄清）：`replicaCount>1` 的双拓扑（public×N + admin×1）下，**core 侧的「联邦」不可用**——节点身份是进程级 Ed25519，多副本语义未定义，core 在多副本模式自动降级关闭联邦。
+> 但本组件**仍然有用**：它是 PigeonBeam（信鸽直传）的公共 rendezvous 与加密中继底座，与 core 的联邦开关无关。⇒ Box 侧已无设备直传（core 的直传编排已摘除、server 镜像也不再随包 p2pc），本组件的信令/中继只服务 PigeonBeam 客户端；想让本 Box 实例自己参与联邦，请用单机形态，而不是指望这里的开关。
 
 ### 存储
 
