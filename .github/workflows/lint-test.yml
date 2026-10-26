@@ -47,6 +47,25 @@ jobs:
         if: github.event_name != 'push' && steps.list-changed.outputs.changed == 'true'
         run: ct lint --target-branch ${{ github.event.repository.default_branch }}
 
+      # 反代体积上限断言（2026-10-26 审计 P1）：chart 默认值此前是 1024m，
+      # 而全生态早已统一抬到 8192m ⇒ Helm 用户按默认值部署 = nginx 1GiB 硬顶
+      # + 服务端允许 4GiB ⇒ **重演 2026-10-23 的 413 事故**（大文件传到一半
+      # 被拒，业务上限形同虚设）。
+      # 本断言是 charts 仓的**权威口径**（hub 的跨仓门禁只做二次确认）。
+      - name: 反代体积上限必须 8192m（chart 默认值 + 渲染结果）
+        run: |
+          set -euo pipefail
+          # ① values.yaml 的默认值
+          grep -qE '^\s*clientMaxBodySize:\s*"8192m"\s*$' charts/pigeonbox/values.yaml \
+            || { echo "::error::charts/pigeonbox/values.yaml 的 clientMaxBodySize 必须是 8192m"; exit 1; }
+          # ② 渲染结果（前端 Deployment 的 CLIENT_MAX_BODY_SIZE env）
+          out=$(helm template fcb charts/pigeonbox)
+          echo "$out" | grep -q 'name: CLIENT_MAX_BODY_SIZE' \
+            || { echo "::error::渲染结果里没有 CLIENT_MAX_BODY_SIZE"; exit 1; }
+          echo "$out" | grep -A1 'name: CLIENT_MAX_BODY_SIZE' | grep -q 'value: "8192m"' \
+            || { echo "::error::渲染出的 CLIENT_MAX_BODY_SIZE 不是 8192m"; exit 1; }
+          echo "✓ 反代体积上限 = 8192m"
+
       # 多副本拆分拓扑守卫(纯渲染,无需集群):replicaCount>1 必须渲染出
       # public×N + admin×1 双平面 + admin 控制台入口链,且 server Service 只选 public 平面
       - name: Render split-mode topology (PR)
