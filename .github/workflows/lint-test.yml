@@ -5,6 +5,11 @@ on:
   push:
     branches:
       - main
+  # 手工触发走**与 push 完全相同**的路径(kind + 镜像预载 + 真实安装冒烟):
+  # PR 路径不跑预载(缺镜像凭据/太慢),于是"预载本身坏了"在 PR 上无人能看见——
+  # 2026-11-03 起连续 10 次红正是这样潜伏的。有了这个入口,改预载逻辑可以先在
+  # 分支上全路径验证一遍再合并。
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -36,7 +41,7 @@ jobs:
       # 故 push 改为下方显式 helm 安装冒烟,零隐式行为。
       - name: Run chart-testing (list-changed)
         id: list-changed
-        if: github.event_name != 'push'
+        if: github.event_name == 'pull_request'
         run: |
           changed=$(ct list-changed --target-branch ${{ github.event.repository.default_branch }})
           if [[ -n "$changed" ]]; then
@@ -44,7 +49,7 @@ jobs:
           fi
 
       - name: Run chart-testing (lint)
-        if: github.event_name != 'push' && steps.list-changed.outputs.changed == 'true'
+        if: github.event_name == 'pull_request' && steps.list-changed.outputs.changed == 'true'
         run: ct lint --target-branch ${{ github.event.repository.default_branch }}
 
       # 反代体积上限断言（2026-10-26 审计 P1）：chart 默认值此前是 1024m，
@@ -69,7 +74,7 @@ jobs:
       # 多副本拆分拓扑守卫(纯渲染,无需集群):replicaCount>1 必须渲染出
       # public×N + admin×1 双平面 + admin 控制台入口链,且 server Service 只选 public 平面
       - name: Render split-mode topology (PR)
-        if: github.event_name != 'push'
+        if: github.event_name == 'pull_request'
         run: |
           out=$(helm template fcb charts/pigeonbox \
             --set replicaCount=2 --set serverAdmin.ingress.enabled=true)
@@ -82,7 +87,7 @@ jobs:
           echo "split topology OK"
 
       - name: Create kind cluster
-        if: github.event_name == 'push' || steps.list-changed.outputs.changed == 'true'
+        if: github.event_name != 'pull_request' || steps.list-changed.outputs.changed == 'true'
         uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
 
       # chart bump 与 server 打 tag 几乎同时(依赖升级提交同时触发两条流水线),
@@ -92,7 +97,7 @@ jobs:
       # manifest GET 恒 401(本机同请求 200),不可用作探测;docker 拉取路径没问题。
       # 拉到后 kind load 预载,部署按 IfNotPresent 直接用,不依赖节点实时拉取。
       - name: Wait for app images & preload into kind (push)
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: |
           tag=$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2; exit}' charts/pigeonbox/Chart.yaml)
           tag=${tag#v}
@@ -114,12 +119,30 @@ jobs:
           fails=0
           for j in $(jobs -p); do wait "$j" || fails=1; done
           [ "$fails" = 0 ] || exit 1
+          # ⚠️ 不能用 kind load docker-image:应用镜像是**多架构 OCI index**
+          # (linux/amd64 + linux/arm64,arm64 由 qemu 交叉构建),而 kind 的装载实现
+          # 是 ctr images import **--all-platforms** ⇒ 它要求 index 里**每个**平台的
+          # blob 都在归档内;而 docker pull 只落 runner 本平台 ⇒ 另一平台的 manifest
+          # 缺失 ⇒ "content digest sha256:...: not found" ⇒ 预载失败 ⇒ release 之后的
+          # kind 冒烟恒红(2026-11-03 起 10 连红,而 Release Charts 一直绿 ⇒ chart 的
+          # 真机部署验证事实上停摆,5 天无人发现)。
+          # 修法:自己 docker save(归档仍是完整 index)再**显式 pin 平台**导入——
+          # ctr 的 --platform 只挑该平台的 manifest 解包,不要求另一平台的 blob。
+          # 正反两向实测(pin 到归档里没有的平台仍报同一个 not found ⇒ 证明 --platform
+          # 真的在筛,不是被忽略;pin 到有的平台 ⇒ 导入成功,kubelet 以
+          # imagePullPolicy:Never 直接 "already present on machine" 起容器)。
+          node=$(kind get nodes --name chart-testing | head -1)
+          arch=$(uname -m); case "$arch" in x86_64) arch=amd64;; aarch64) arch=arm64;; esac
           for image in $images; do
-            kind load docker-image "ghcr.io/pigeonbox/${image}:${tag}" --name chart-testing
+            ref="ghcr.io/pigeonbox/${image}:${tag}"
+            docker save "$ref" | docker exec -i "$node" \
+              ctr --namespace=k8s.io images import --platform "linux/${arch}" \
+                --digests --snapshotter=overlayfs -
+            echo "  ✓ 预载 $ref (linux/${arch})"
           done
 
       - name: Real install smoke (push)
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: |
           helm lint charts/pigeonbox
           helm upgrade --install fcb charts/pigeonbox -n fcb-ci --create-namespace \
@@ -131,7 +154,7 @@ jobs:
       # --set config.storage=null 删掉 overlay 的 config.storage 段,让内置接线真正生效
       #(显式 config.storage 存在时 chart 让位,冒烟就变成空转了)
       - name: S3 (SeaweedFS) install smoke (push)
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: |
           helm upgrade --install fcb-s3 charts/pigeonbox -n fcb-s3 --create-namespace \
             -f charts/pigeonbox/ci/config-overlay-values.yaml \
@@ -145,7 +168,7 @@ jobs:
       # 冒烟失败时必须留下 Pod 级证据:此前三连挂时失败日志只有一行
       # "Deployment not ready 0/1",分不清是镜像未发布/init 容器卡住/探针语法哪层的问题。
       - name: Dump failure diagnostics (push)
-        if: failure() && github.event_name == 'push'
+        if: failure() && github.event_name != 'pull_request'
         run: |
           for ns in fcb-ci fcb-s3; do
             echo "════════ 命名空间 $ns ════════"
@@ -160,5 +183,5 @@ jobs:
           done
 
       - name: Run chart-testing (install)
-        if: github.event_name != 'push' && steps.list-changed.outputs.changed == 'true'
+        if: github.event_name == 'pull_request' && steps.list-changed.outputs.changed == 'true'
         run: ct install --target-branch ${{ github.event.repository.default_branch }}
