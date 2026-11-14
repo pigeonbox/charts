@@ -194,6 +194,16 @@ app.kubernetes.io/managed-by: {{ .root.Release.Service }}
 {{- printf "%s-redis" (include "pigeonbox.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/*
+Redis 认证 Secret 名:密码默认开启后的**单点真相源**。
+所有消费方(redis args / probes / wait-redis / PB_REDIS_PASSWORD)一律 secretKeyRef
+引用它——明文只允许存在于 redis-auth-secret.yaml 一个模板里
+(多模板各自 randAlphaNum 会渲染出互不一致的密码)。
+*/}}
+{{- define "pigeonbox.redis.secretName" -}}
+{{- printf "%s-redis-auth" (include "pigeonbox.redis.fullname" .) -}}
+{{- end -}}
+
 {{- define "pigeonbox.mysql.fullname" -}}
 {{- printf "%s-mysql" (include "pigeonbox.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}

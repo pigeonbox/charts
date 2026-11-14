@@ -237,7 +237,9 @@ redis:
     tag: "7-alpine"
     pullPolicy: IfNotPresent
   auth:
-    # 留空 = 无密码(仅集群内网可达);设置后开启 requirepass 并注入 PB_REDIS_PASSWORD
+    # 留空 = 自动生成并持久化到 Secret(<fullname>-redis-auth,upgrade 经 lookup 续用);
+    # 设置 = 强制使用该值(同样落进 Secret)。密码默认开启:redis args / 探针 /
+    # wait-redis / PB_REDIS_PASSWORD 全部 secretKeyRef 消费,渲染结果无明文。
     password: ""
   persistence:
     enabled: true

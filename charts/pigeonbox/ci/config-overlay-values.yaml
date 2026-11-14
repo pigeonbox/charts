@@ -51,8 +51,9 @@ config:
 secret:
   adminPassword: ci-admin-password
   production: true
-# 冒烟走「密码开启」路径：redis requirepass 生效，检验 wait-redis init 注入
-# REDISCLI_AUTH 后不再死等（默认无密码路径由 lint-test 的 unset 渲染断言覆盖）
+# 冒烟走「显式密码」路径：强制值落进 Secret 后 requirepass 生效，检验 wait-redis
+# init 经 secretKeyRef 注入 REDISCLI_AUTH 后不再死等（默认自动生成密码路径由
+# lint-test 的默认渲染断言覆盖）
 redis:
   auth:
     password: ci-overlay-redis-pass

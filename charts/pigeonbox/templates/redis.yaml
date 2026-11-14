@@ -58,20 +58,26 @@ spec:
                 - ALL
           image: {{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag | default "7-alpine" }}
           imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
-          {{- if .Values.redis.auth.password }}
-          args: ["redis-server", "--appendonly", "yes", "--requirepass", {{ .Values.redis.auth.password | quote }}]
+          # 密码默认开启:从 <fullname>-redis-auth 读取(secretKeyRef),
+          # 明文只存在于 Secret 模板,不散落渲染结果。
+          # REDISCLI_AUTH 放**容器级** env(不是 probe env——ExecAction 无 env 字段),
+          # 探针 exec 继承容器环境,故两处探测直接 redis-cli ping 即可。
+          command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$REDIS_PASSWORD\""]
           env:
-            # redis-cli 探测经 REDISCLI_AUTH 认证,避免密码拼进探针命令行
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pigeonbox.redis.secretName" $ }}
+                  key: password
             - name: REDISCLI_AUTH
-              value: {{ .Values.redis.auth.password | quote }}
-          {{- else }}
-          args: ["redis-server", "--appendonly", "yes"]
-          {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pigeonbox.redis.secretName" $ }}
+                  key: password
           ports:
             - name: redis
               containerPort: 6379
               protocol: TCP
-          {{- if .Values.redis.auth.password }}
           livenessProbe:
             exec:
               command: ["sh", "-c", "redis-cli ping | grep -q PONG"]
@@ -86,22 +92,6 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
-          {{- else }}
-          livenessProbe:
-            exec:
-              command: ["redis-cli", "ping"]
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-          readinessProbe:
-            exec:
-              command: ["redis-cli", "ping"]
-            initialDelaySeconds: 3
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 3
-          {{- end }}
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
           volumeMounts:

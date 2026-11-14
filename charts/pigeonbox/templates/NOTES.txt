@@ -37,7 +37,7 @@
 
 4. 数据面服务:
 {{- if .Values.redis.enabled }}
-   Redis: 内置 {{ include "pigeonbox.redis.fullname" . }} (已自动注入 PB_REDIS_HOST;{{ if .Values.redis.auth.password }}已启用密码{{ else }}无密码,仅限集群内{{ end }}){{ if get (.Values.config | default dict) "redis" }} ⚠️ config.redis 已显式配置,内置实例未接线{{ end }}
+   Redis: 内置 {{ include "pigeonbox.redis.fullname" . }} (已自动注入 PB_REDIS_HOST;已启用密码,认证 Secret: {{ include "pigeonbox.redis.secretName" . }}){{ if get (.Values.config | default dict) "redis" }} ⚠️ config.redis 已显式配置,内置实例未接线{{ end }}
 {{- else }}
    Redis: 未启用 —— 单机内存模式(core v0.14.0+):匿名取件/直传全功能可用,
    重启丢失未取件映射;多副本部署或需重启不丢请设 config.redis.host 指向外部 Redis。
