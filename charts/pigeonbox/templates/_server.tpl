@@ -62,6 +62,11 @@ spec:
         - name: wait-redis
           image: {{ $ctx.Values.redis.image.repository }}:{{ $ctx.Values.redis.image.tag | default "7-alpine" }}
           imagePullPolicy: {{ $ctx.Values.redis.image.pullPolicy }}
+          {{- if $ctx.Values.redis.auth.password }}
+          env:
+            - name: REDISCLI_AUTH
+              value: {{ $ctx.Values.redis.auth.password | quote }}
+          {{- end }}
           command: ["sh", "-c", "until redis-cli -h {{ include "pigeonbox.redis.fullname" $ctx }} ping 2>/dev/null | grep -q PONG; do echo waiting for redis; sleep 2; done"]
           resources:
             requests:
