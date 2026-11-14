@@ -71,6 +71,12 @@ jobs:
             || { echo "::error::渲染出的 CLIENT_MAX_BODY_SIZE 不是 8192m"; exit 1; }
           echo "✓ 反代体积上限 = 8192m"
 
+      - name: wait-redis carries REDISCLI_AUTH when password set
+        run: |
+          helm template pb charts/pigeonbox --set redis.auth.password=litmus > /tmp/rendered.yaml
+          grep -A20 'name: wait-redis' /tmp/rendered.yaml | grep -q 'REDISCLI_AUTH' \
+            || { echo "wait-redis 缺少 REDISCLI_AUTH（密码开启时 init 将死等）"; exit 1; }
+
       # 多副本拆分拓扑守卫(纯渲染,无需集群):replicaCount>1 必须渲染出
       # public×N + admin×1 双平面 + admin 控制台入口链,且 server Service 只选 public 平面
       - name: Render split-mode topology (PR)
