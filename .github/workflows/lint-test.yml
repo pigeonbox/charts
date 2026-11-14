@@ -139,7 +139,7 @@ jobs:
 
       - name: Create kind cluster
         if: github.event_name != 'pull_request' || steps.list-changed.outputs.changed == 'true'
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
 
       # chart bump 与 server 打 tag 几乎同时(依赖升级提交同时触发两条流水线),
       # 多架构镜像(qemu arm64)要 10-30 分钟才 publish;kind 只等 5m,不等镜像
