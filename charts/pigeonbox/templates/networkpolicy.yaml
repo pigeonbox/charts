@@ -1,0 +1,31 @@
+{{- if and .Values.networkPolicy.enabled .Values.redis.enabled }}
+{{- /* 选择器与两侧真实 Pod 标签逐字对齐(选不中 Pod 的 NetworkPolicy 是静默 no-op):
+       redis Pod 标签 = pigeonbox.data.selectorLabels(component=redis) ⇒
+         app.kubernetes.io/name: <name>-redis / instance: <release>
+       server Pod 标签 = pigeonbox.server.selectorLabels ⇒
+         app.kubernetes.io/name: <name> / instance: <release> / component: server|server-public|server-admin
+       ⇒ from 侧只锁 name+instance(component 随平面漂移,锁死会挡掉拆分模式的 public/admin),
+         name 带 -redis/-frontend/-mysql 等后缀的 Pod 天然选不进来。 */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "pigeonbox.redis.fullname" . }}-deny
+  labels:
+    {{- include "pigeonbox.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "pigeonbox.name" . }}-redis
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "pigeonbox.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 6379
+          protocol: TCP
+{{- end }}

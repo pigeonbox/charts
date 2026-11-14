@@ -77,6 +77,51 @@ jobs:
           grep -A20 'name: wait-redis' /tmp/rendered.yaml | grep -q 'REDISCLI_AUTH' \
             || { echo "wait-redis 缺少 REDISCLI_AUTH（密码开启时 init 将死等）"; exit 1; }
 
+      # 默认认证:密码默认开启,单点生成进 <fullname>-redis-auth,消费方全 secretKeyRef
+      # (多模板各自 randAlphaNum 会互不一致 ⇒ 明文只允许出现在 Secret 模板里)
+      - name: default install renders redis auth secret + networkpolicy
+        run: |
+          helm template pb charts/pigeonbox > /tmp/def.yaml
+          grep -q 'kind: Secret' /tmp/def.yaml || { echo "缺少默认认证 Secret"; exit 1; }
+          grep -q 'redis-auth' /tmp/def.yaml || { echo "缺少 <fullname>-redis-auth Secret"; exit 1; }
+          grep -q 'REDISCLI_AUTH' /tmp/def.yaml || { echo "消费方未引用认证"; exit 1; }
+          grep -q 'PB_REDIS_PASSWORD' /tmp/def.yaml || { echo "消费方未注入 PB_REDIS_PASSWORD"; exit 1; }
+          grep -q 'kind: NetworkPolicy' /tmp/def.yaml || { echo "缺少 NetworkPolicy"; exit 1; }
+      - name: explicit password lands in secret
+        run: |
+          helm template pb charts/pigeonbox --set redis.auth.password=litmus > /tmp/pw.yaml
+          # b64 必须出现在渲染结果(=落进了 Secret data)
+          grep -q "$(printf litmus | base64)" /tmp/pw.yaml \
+            || { echo "显式密码未 base64 落进 Secret"; exit 1; }
+          # 反向:明文只允许活在 Secret 模板内,消费方一律 secretKeyRef
+          ! grep -q '"litmus"' /tmp/pw.yaml \
+            || { echo "密码以明文散落在渲染结果里(应只在 Secret data)"; exit 1; }
+
+      # NetworkPolicy 的 podSelector/from 必须与两侧**真实 Pod 标签**逐字对齐——
+      # 选不中任何 Pod 的 NetworkPolicy 是静默 no-op(渲染全绿、一条流量也没管)。
+      - name: networkpolicy selectors match real pod labels
+        run: |
+          set -euo pipefail
+          helm template pb charts/pigeonbox --show-only templates/redis.yaml > /tmp/np-redis.yaml
+          helm template pb charts/pigeonbox --show-only templates/deployment.yaml > /tmp/np-srv.yaml
+          helm template pb charts/pigeonbox --show-only templates/networkpolicy.yaml > /tmp/np.yaml
+          # Pod 模板标签块(spec.template.metadata.labels: 6 空格 labels:,条目 8 空格)
+          pod_labels() { awk '/^  template:/{t=1} t&&/^      labels:/{g=1;next} g&&/^        [A-Za-z]/{print;next} g{exit}' "$1"; }
+          redis_labels=$(pod_labels /tmp/np-redis.yaml)
+          srv_labels=$(pod_labels /tmp/np-srv.yaml)
+          [ -n "$redis_labels" ] || { echo "::error::取不到 redis Pod 标签"; exit 1; }
+          [ -n "$srv_labels" ] || { echo "::error::取不到 server Pod 标签"; exit 1; }
+          # podSelector 块(第 2 个 podSelector 是 from 侧;取第 1 个)
+          np_sel=$(awk '/^  podSelector:/{n++; if(n==1){f=1;next}} f&&/^    matchLabels:/{g=1;next} f&&!/^    matchLabels:/{f=0} g&&/^      /{print;next} g{exit}' /tmp/np.yaml)
+          np_from=$(awk '/^        - podSelector:/{f=1;next} f&&/^            matchLabels:/{g=1;next} f&&!/^            matchLabels:/{f=0} g&&/^              /{print;next} g{exit}' /tmp/np.yaml)
+          [ -n "$np_sel" ] || { echo "::error::取不到 NetworkPolicy podSelector"; exit 1; }
+          [ -n "$np_from" ] || { echo "::error::取不到 NetworkPolicy from 选择器"; exit 1; }
+          # 去缩进后**整行精确**匹配(子串匹配会把 pigeonbox 误判命中 pigeonbox-redis)
+          trim() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          echo "$np_sel"  | trim | while IFS= read -r kv; do [ -n "$kv" ] || continue; echo "$redis_labels" | trim | grep -qxF "$kv" || { echo "::error::podSelector [$kv] 不在 redis Pod 标签里 ⇒ 选不中(静默 no-op)"; exit 1; }; done
+          echo "$np_from" | trim | while IFS= read -r kv; do [ -n "$kv" ] || continue; echo "$srv_labels"  | trim | grep -qxF "$kv" || { echo "::error::from [$kv] 不在 server Pod 标签里 ⇒ 放行不了后端流量"; exit 1; }; done
+          echo "✓ podSelector ↔ redis Pod 标签, from ↔ server Pod 标签 已对齐"
+
       # 多副本拆分拓扑守卫(纯渲染,无需集群):replicaCount>1 必须渲染出
       # public×N + admin×1 双平面 + admin 控制台入口链,且 server Service 只选 public 平面
       - name: Render split-mode topology (PR)

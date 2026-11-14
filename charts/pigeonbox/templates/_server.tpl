@@ -62,11 +62,14 @@ spec:
         - name: wait-redis
           image: {{ $ctx.Values.redis.image.repository }}:{{ $ctx.Values.redis.image.tag | default "7-alpine" }}
           imagePullPolicy: {{ $ctx.Values.redis.image.pullPolicy }}
-          {{- if $ctx.Values.redis.auth.password }}
+          # 密码默认开启且永不以明文出现:认证从 Secret 读(secretKeyRef),
+          # 否则 init 死等(Task 1 修复的路径,这里换成引用形态)
           env:
             - name: REDISCLI_AUTH
-              value: {{ $ctx.Values.redis.auth.password | quote }}
-          {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pigeonbox.redis.secretName" $ctx }}
+                  key: password
           command: ["sh", "-c", "until redis-cli -h {{ include "pigeonbox.redis.fullname" $ctx }} ping 2>/dev/null | grep -q PONG; do echo waiting for redis; sleep 2; done"]
           resources:
             requests:
@@ -152,10 +155,12 @@ spec:
               value: {{ include "pigeonbox.redis.fullname" $ctx }}
             - name: PB_REDIS_PORT
               value: "6379"
-            {{- if $ctx.Values.redis.auth.password }}
+            # 密码默认开启:无条件 secretKeyRef 注入(不再按值条件/明文渲染)
             - name: PB_REDIS_PASSWORD
-              value: {{ $ctx.Values.redis.auth.password | quote }}
-            {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pigeonbox.redis.secretName" $ctx }}
+                  key: password
             {{- end }}
             {{- if $ctx.Values.mysql.enabled }}
             - name: PB_DATABASE_DRIVER
