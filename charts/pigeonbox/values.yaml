@@ -256,6 +256,12 @@ redis:
       cpu: 500m
       memory: 256Mi
 
+networkPolicy:
+  # 默认开启:redis 仅放行后端 Pod 入站 6379(CNI 不支持 NetworkPolicy 时该对象被忽略,无副作用)。
+  # 选不中任何 Pod 的 NetworkPolicy 是静默 no-op ⇒ 选择器必须与 redis/server 两侧真实 Pod 标签
+  # 逐字对齐(templates/networkpolicy.yaml 头注释记录了推导;lint-test 有交叉断言)。
+  enabled: true
+
 # P2P 联邦注册中心(可选组件,M2;默认关): 开启即部署单副本 p2p(节点注册/
 # 口令联邦路由,内存存储无状态),同时把后端 env 注入 PB_FEDERATION_* 指向它。
 # 集群内 Service: <release>-p2p:12346;config 显式配置 federation 段时本开关让位。

@@ -77,7 +77,8 @@ helm install pigeonbox pigeonbox/pigeonbox --namespace pigeonbox --create-namesp
 | 参数 | 说明 | 默认值 |
 |---|---|---|
 | `redis.enabled` | 内置 Redis（取件码映射持久化；多副本共享/广播依赖）；单机关闭后为内存模式（重启丢映射，core v0.14.0+）；config 显式配置 `redis` 段时自动让位 | `true` |
-| `redis.image.*` / `auth.password` / `persistence.*` / `resources` | 镜像 `redis:7-alpine`；密码留空=无密码(仅集群内)；AOF 持久化 1Gi | 见 values.yaml |
+| `redis.image.*` / `auth.password` / `persistence.*` / `resources` | 镜像 `redis:7-alpine`；密码默认开启——留空自动生成进 Secret `<fullname>-redis-auth`(upgrade 经 lookup 续用)，设置=强制值；消费方全 secretKeyRef；AOF 持久化 1Gi | 见 values.yaml |
+| `networkPolicy.enabled` | 默认开启：NetworkPolicy 只放行后端 Pod 入站 redis 6379（CNI 不支持时对象被忽略，无副作用） | `true` |
 | `mysql.enabled` / `postgresql.enabled` | 内置 MySQL 8.4 / PostgreSQL 17 单副本 StatefulSet（默认关）；开启即自动注入 `PB_DATABASE_*` | `false` |
 | `mysql.auth.*` / `postgresql.auth.*` | `username`(默认 pigeonbox)、`database`(默认 pigeonbox)、密码留空=随机生成并跨升级复用 | 见 values.yaml |
 | `mysql.persistence.size` / `postgresql.persistence.size` | 数据卷 | `10Gi` |
