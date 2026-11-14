@@ -13,7 +13,7 @@
 
 | Chart | 说明 | Chart 版本 | App 版本 |
 |---|---|---|---|
-| `pigeonbox` | 前后端分离双 Deployment：[frontend](https://github.com/pigeonbox/frontend)（nginx 静态+反代）→ [server](https://github.com/pigeonbox/server)（API）；Ingress 指向 frontend Service | 2.0.51 | v3.3.2 |
+| `pigeonbox` | 前后端分离双 Deployment：[frontend](https://github.com/pigeonbox/frontend)（nginx 静态+反代）→ [server](https://github.com/pigeonbox/server)（API）；Ingress 指向 frontend Service | 见 [Chart.yaml](charts/pigeonbox/Chart.yaml) 的 `version`（发版自动刷新，勿在 README 手写小版本） | 同文件 `appVersion`（= server 镜像 tag，与产品号同步） |
 
 支持可选组件：Redis（默认开）/ MySQL / PostgreSQL / S3 对象存储（SeaweedFS）/ PVC / Ingress / ServiceMonitor(Prometheus) / p2p 联邦注册中心（1.3.4 起，`p2p.enabled`，1.3.7 起含 PigeonBeam 直传中继开关；2.0 起默认 chart 名即 pigeonbox）；2.0 线(自 1.3.22 起)多副本双拓扑（`replicaCount>1` 自动渲染 public×N + admin×1，`PB_DEPLOY_MODE`）。
 
@@ -21,7 +21,7 @@
 
 ## 安装
 
-方式一：Helm 仓库（GitHub Pages，由 chart-releaser 自动发布）
+方式一（**推荐**）：Helm 仓库（GitHub Pages，由 chart-releaser 自动发布）——始终装到最新已发布版本，不依赖手写版本号
 
 ```bash
 helm repo add pigeonbox https://pigeonbox.github.io/charts
@@ -40,10 +40,11 @@ helm install pigeonbox oci://ghcr.io/pigeonbox/charts/pigeonbox
 
 方式三：直接使用 Release 制品
 
-从 [Releases](https://github.com/pigeonbox/charts/releases) 下载 `pigeonbox-<version>.tgz`：
+从 [Releases](https://github.com/pigeonbox/charts/releases) 下载 `pigeonbox-<version>.tgz`
+（`<version>` 以 Releases 最新为准，与 [Chart.yaml](charts/pigeonbox/Chart.yaml) 同源）：
 
 ```bash
-helm install pigeonbox ./pigeonbox-2.0.51.tgz
+helm install pigeonbox ./pigeonbox-<version>.tgz
 ```
 
 生产环境最少建议覆盖：
