@@ -70,7 +70,9 @@ spec:
                 secretKeyRef:
                   name: {{ include "pigeonbox.redis.secretName" $ctx }}
                   key: password
-          command: ["sh", "-c", "until redis-cli -h {{ include "pigeonbox.redis.fullname" $ctx }} ping 2>/dev/null | grep -q PONG; do echo waiting for redis; sleep 2; done"]
+          {{- /* #19: until 必须有最大重试次数——密码错/redis 挂时无限循环 = init 静默死等,
+             用户只看到 Init 卡住无任何报错; 60 次 × 2s ≈ 2 分钟后 exit 1 响亮失败 */}}
+          command: ["sh", "-c", "i=0; until redis-cli -h {{ include "pigeonbox.redis.fullname" $ctx }} ping 2>/dev/null | grep -q PONG; do i=$((i+1)); if [ $i -ge 60 ]; then echo wait-redis: redis not ready after 60 attempts >&2; exit 1; fi; echo waiting for redis; sleep 2; done"]
           resources:
             requests:
               cpu: 10m

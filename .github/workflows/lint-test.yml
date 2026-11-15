@@ -77,6 +77,20 @@ jobs:
           grep -A20 'name: wait-redis' /tmp/rendered.yaml | grep -q 'REDISCLI_AUTH' \
             || { echo "wait-redis 缺少 REDISCLI_AUTH（密码开启时 init 将死等）"; exit 1; }
 
+      # #19: until 循环必须有最大重试次数——无上限时密码错/redis 挂 = init 静默死等,
+      # Pod 永卡 Init 且零报错。变异负对照:去掉 `-ge 60 ... exit 1` 后本步必红(本地已验)。
+      - name: wait-redis has retry cap and fails loudly
+        run: |
+          set -euo pipefail
+          helm template pb charts/pigeonbox > /tmp/wr.yaml
+          cmd=$(awk '/name: wait-redis/{f=1} f && /until redis-cli/{print; exit}' /tmp/wr.yaml)
+          [ -n "$cmd" ] || { echo "::error::取不到 wait-redis 的 until 命令"; exit 1; }
+          echo "$cmd" | grep -q 'ge 60' \
+            || { echo "::error::wait-redis until 循环缺少最大重试次数(60)——无上限即静默死等"; exit 1; }
+          echo "$cmd" | grep -q 'exit 1' \
+            || { echo "::error::wait-redis 超限未响亮失败(exit 1)"; exit 1; }
+          echo "✓ wait-redis 重试上限 + 响亮失败已渲染"
+
       # 默认认证:密码默认开启,单点生成进 <fullname>-redis-auth,消费方全 secretKeyRef
       # (多模板各自 randAlphaNum 会互不一致 ⇒ 明文只允许出现在 Secret 模板里)
       - name: default install renders redis auth secret + networkpolicy
