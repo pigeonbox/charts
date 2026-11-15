@@ -43,19 +43,24 @@ drill_ensure_cluster() {
   kubectl config use-context "kind-$DRILL_CLUSTER" >/dev/null
 }
 
-# 镜像预载：docker pull（本平台）→ 节点内 ctr import pin 平台（幂等，重复导入无害）
+# 单镜像预载：docker pull（本平台）→ 节点内 ctr import pin 平台（幂等，重复导入无害）
+drill_preload_one() {
+  local ref="$1"
+  local node; node=$(kind get nodes --name "$DRILL_CLUSTER" | head -1)
+  docker pull -q "$ref" >/dev/null || fail "镜像拉取失败: $ref"
+  docker save "$ref" | docker exec -i "$node" \
+    ctr --namespace=k8s.io images import --platform "linux/$(drill_arch)" \
+      --digests --snapshotter=overlayfs - >/dev/null \
+    || fail "镜像预载失败: $ref"
+  ok "预载 $ref"
+}
+
+# 预载默认三镜像（appVersion tag 的 server/frontend + redis）
 drill_preload_images() {
   local tag; tag=$(drill_app_tag)
-  local node; node=$(kind get nodes --name "$DRILL_CLUSTER" | head -1)
-  local ref
-  for ref in "ghcr.io/pigeonbox/server:$tag" "ghcr.io/pigeonbox/frontend:$tag" "redis:7-alpine"; do
-    docker pull -q "$ref" >/dev/null || fail "镜像拉取失败: $ref"
-    docker save "$ref" | docker exec -i "$node" \
-      ctr --namespace=k8s.io images import --platform "linux/$(drill_arch)" \
-        --digests --snapshotter=overlayfs - >/dev/null \
-      || fail "镜像预载失败: $ref"
-    ok "预载 $ref"
-  done
+  drill_preload_one "ghcr.io/pigeonbox/server:$tag"
+  drill_preload_one "ghcr.io/pigeonbox/frontend:$tag"
+  drill_preload_one "redis:7-alpine"
 }
 
 # 安装/升级到最新 chart（与 workflow 冒烟同参）并等 Ready。
