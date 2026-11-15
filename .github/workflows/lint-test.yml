@@ -138,6 +138,32 @@ jobs:
             || { echo "::error::PB_P2P_ADMIN_PASSWORD 未走 secretKeyRef"; exit 1; }
           echo "✓ p2p 口令走 Secret,渲染零明文"
 
+      # #27: 显式密码轮换必须滚动 Pod——values-based checksum 注解(server+redis 双侧)。
+      # 反向断言: 默认(自动生成密码)渲染**不得**有任何 redis-auth checksum——
+      # 用 render 结果做 checksum 会因每次随机而每次都滚动(每条 upgrade 无谓重启)。
+      # 变异负对照: 注解改回 render 结果并去掉 if 守卫后本步必红(本地已验)。
+      - name: redis auth password rotation triggers rollout via values checksum
+        run: |
+          set -euo pipefail
+          want=$(printf rotated-a | sha256sum | cut -d' ' -f1)
+          helm template pb charts/pigeonbox --set redis.auth.password=rotated-a > /tmp/c1.yaml
+          # 双侧(server Pod 模板 + redis Pod 模板)都必须带同一 values-based 值
+          [ "$(grep -c "checksum/redis-auth: $want" /tmp/c1.yaml)" -ge 2 ] \
+            || { echo "::error::server/redis 双侧缺 checksum/redis-auth(或值非 sha256(密码))"; exit 1; }
+          # 同一密码两次渲染注解值恒定(值变才滚动的前提)
+          helm template pb charts/pigeonbox --set redis.auth.password=rotated-a > /tmp/c2.yaml
+          diff <(grep 'checksum/redis-auth' /tmp/c1.yaml) <(grep 'checksum/redis-auth' /tmp/c2.yaml) >/dev/null \
+            || { echo "::error::同密码两次渲染注解不一致(非 values-based)"; exit 1; }
+          # 换密码 ⇒ 注解值必须变(轮换触发滚动)
+          helm template pb charts/pigeonbox --set redis.auth.password=rotated-b > /tmp/c3.yaml
+          ! grep -q "checksum/redis-auth: $want" /tmp/c3.yaml \
+            || { echo "::error::换密码后注解值未变(轮换不滚动)"; exit 1; }
+          # 默认路径无显式密码: 不得出现任何 redis-auth checksum(防 render 随机 ⇒ 每次滚动)
+          helm template pb charts/pigeonbox > /tmp/c0.yaml
+          ! grep -q 'checksum/redis-auth' /tmp/c0.yaml \
+            || { echo "::error::默认渲染出现 redis-auth checksum(随机渲染值会导致每次 upgrade 都滚动)"; exit 1; }
+          echo "✓ 显式密码轮换滚动 + 默认路径零滚动注解"
+
       # 默认认证:密码默认开启,单点生成进 <fullname>-redis-auth,消费方全 secretKeyRef
       # (多模板各自 randAlphaNum 会互不一致 ⇒ 明文只允许出现在 Secret 模板里)
       - name: default install renders redis auth secret + networkpolicy

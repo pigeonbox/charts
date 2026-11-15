@@ -39,6 +39,12 @@ spec:
         {{- if and $ctx.Values.secret.create (not $ctx.Values.secret.existingSecret) }}
         checksum/secret: {{ include (print $ctx.Template.BasePath "/secret.yaml") $ctx | sha256sum }}
         {{- end }}
+        {{- /* #27: values-based checksum——只哈希 values 里的显式密码,值变才滚动。
+           禁止改用"模板 render 结果"做 checksum: Secret 每次渲染含随机生成值,
+           会导致每次 upgrade 都无谓滚动(显式密码路径才有轮换语义) */}}
+        {{- if $ctx.Values.redis.auth.password }}
+        checksum/redis-auth: {{ $ctx.Values.redis.auth.password | sha256sum }}
+        {{- end }}
         {{- with $ctx.Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
