@@ -119,6 +119,25 @@ jobs:
             || { echo "::error::postgresql 缺 pod 级 fsGroup: 70"; exit 1; }
           echo "✓ mysql/postgresql 收紧基线已渲染"
 
+      # #22: p2p.adminPassword 必须落 Secret(secretKeyRef),渲染零明文——
+      # 明文 value 进 Pod spec/etcd/事件流,读 Pod 的 RBAC 通常比读 Secret 宽。
+      # 变异负对照: 改回 value: 明文后本步必红(本地已验)。
+      - name: p2p admin password lives in secret, not pod spec
+        run: |
+          set -euo pipefail
+          helm template pb charts/pigeonbox --set p2p.enabled=true \
+            --set p2p.adminPassword=litmus > /tmp/p2p.yaml
+          # b64 必须在(=落进 Secret data)
+          grep -q "$(printf litmus | base64)" /tmp/p2p.yaml \
+            || { echo "::error::p2p 口令未 base64 落进 Secret"; exit 1; }
+          # 反向: 渲染结果任何位置不得出现明文(b64 不含原文,可安全全文 grep)
+          ! grep -q 'litmus' /tmp/p2p.yaml \
+            || { echo "::error::p2p 口令以明文出现在渲染结果"; exit 1; }
+          # 消费方必须 secretKeyRef
+          grep -A8 'name: PB_P2P_ADMIN_PASSWORD' /tmp/p2p.yaml | grep -q 'secretKeyRef' \
+            || { echo "::error::PB_P2P_ADMIN_PASSWORD 未走 secretKeyRef"; exit 1; }
+          echo "✓ p2p 口令走 Secret,渲染零明文"
+
       # 默认认证:密码默认开启,单点生成进 <fullname>-redis-auth,消费方全 secretKeyRef
       # (多模板各自 randAlphaNum 会互不一致 ⇒ 明文只允许出现在 Secret 模板里)
       - name: default install renders redis auth secret + networkpolicy

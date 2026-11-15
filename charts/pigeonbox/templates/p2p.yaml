@@ -38,18 +38,26 @@ spec:
                 - ALL
           image: {{ .Values.p2p.image.repository }}:{{ .Values.p2p.image.tag | default "0.1" }}
           imagePullPolicy: {{ .Values.p2p.image.pullPolicy }}
-          {{- if .Values.p2p.adminPassword }}
+          {{- /* 两段原本各自渲染一个 env: 键——同时设置时 YAML 重复键,
+             转 JSON 后后者覆盖前者(静默丢一项),故合并为单个 env 块 */}}
+          {{- if or .Values.p2p.adminPassword .Values.p2p.relay.enabled }}
           env:
+            {{- if .Values.p2p.adminPassword }}
+            # 口令走 Secret(#22): 明文 value 会进 Pod spec/etcd/事件流,
+            # 读 Pod 的 RBAC 通常比读 Secret 宽
             - name: PB_P2P_ADMIN_PASSWORD
-              value: {{ .Values.p2p.adminPassword | quote }}
-          {{- end }}
-          {{- if .Values.p2p.relay.enabled }}
-          env:
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pigeonbox.p2p.adminSecretName" . }}
+                  key: admin-password
+            {{- end }}
+            {{- if .Values.p2p.relay.enabled }}
             - name: PB_P2P_RELAY_ENABLED
               value: "true"
             {{- if .Values.p2p.relay.mbps }}
             - name: PB_P2P_RELAY_MBPS
               value: {{ .Values.p2p.relay.mbps | quote }}
+            {{- end }}
             {{- end }}
           {{- end }}
           ports:
