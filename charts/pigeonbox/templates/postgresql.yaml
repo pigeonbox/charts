@@ -36,6 +36,18 @@ spec:
         fsGroup: 70   # postgres:17-alpine 镜像内 postgres uid/gid=70,保证卷可写
       containers:
         - name: postgresql
+          securityContext:
+            # 官方 postgres 镜像 entrypoint 默认 root(内部 gosu 降权),与 runAsNonRoot 冲突;
+            # drop ALL 后 root 连 chmod/降权都做不了(实测: chmod: Operation not permitted
+            # + failed switching to 'postgres')⇒ 显式以镜像内 postgres(uid 70)直跑;
+            # 卷可写性由已有的 pod 级 fsGroup: 70 保证(实测 uid70+drop ALL 初始化就绪)
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           image: {{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag | default "17-alpine" }}
           imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
           env:

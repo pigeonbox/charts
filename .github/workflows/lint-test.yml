@@ -91,6 +91,34 @@ jobs:
             || { echo "::error::wait-redis 超限未响亮失败(exit 1)"; exit 1; }
           echo "✓ wait-redis 重试上限 + 响亮失败已渲染"
 
+      # #21: DB StatefulSet 容器必须补齐收紧基线(对齐 server/redis/p2p)——
+      # drop ALL 后 root 必挂(gosu/setgid EPERM,本地 docker 实测),故用镜像内 uid 直跑。
+      # 变异负对照:去掉任一容器 securityContext 后本步必红(本地已验)。
+      - name: db statefulsets carry hardened securityContext
+        run: |
+          set -euo pipefail
+          helm template pb charts/pigeonbox --set mysql.enabled=true --set postgresql.enabled=true \
+            --show-only templates/mysql.yaml --show-only templates/postgresql.yaml > /tmp/db.yaml
+          for spec in "mysql 999" "postgresql 70"; do
+            set -- $spec; db=$1; uid=$2
+            # 容器块 = "- name: <db>" 到其 "image:" 行(securityContext 夹在两者之间)
+            blk=$(awk -v n="- name: $db" '$0 ~ n {f=1} f{print} f && /image:/{exit}' /tmp/db.yaml)
+            [ -n "$blk" ] || { echo "::error::取不到 $db 容器块"; exit 1; }
+            echo "$blk" | grep -q 'runAsNonRoot: true' \
+              || { echo "::error::$db 缺 runAsNonRoot"; exit 1; }
+            echo "$blk" | grep -q "runAsUser: $uid" \
+              || { echo "::error::$db 缺 runAsUser: $uid(镜像内 uid 直跑)"; exit 1; }
+            echo "$blk" | grep -q 'allowPrivilegeEscalation: false' \
+              || { echo "::error::$db 缺 allowPrivilegeEscalation: false"; exit 1; }
+            echo "$blk" | grep -A1 'drop:' | grep -q 'ALL' \
+              || { echo "::error::$db capabilities 未 drop ALL"; exit 1; }
+          done
+          grep -q 'fsGroup: 999' /tmp/db.yaml \
+            || { echo "::error::mysql 缺 pod 级 fsGroup: 999(999 直跑卷不可写)"; exit 1; }
+          grep -q 'fsGroup: 70' /tmp/db.yaml \
+            || { echo "::error::postgresql 缺 pod 级 fsGroup: 70"; exit 1; }
+          echo "✓ mysql/postgresql 收紧基线已渲染"
+
       # 默认认证:密码默认开启,单点生成进 <fullname>-redis-auth,消费方全 secretKeyRef
       # (多模板各自 randAlphaNum 会互不一致 ⇒ 明文只允许出现在 Secret 模板里)
       - name: default install renders redis auth secret + networkpolicy
