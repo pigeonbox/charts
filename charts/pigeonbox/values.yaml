@@ -38,6 +38,21 @@ serverAdmin:
     #    cpu: 50m
     #    memory: 64Mi
 
+# ── PodDisruptionBudget(评审 #23,仅 replicaCount>1 拆分模式渲染)────────
+# 约束**自愿**中断(节点 drain / kubectl drain / 集群维护)时同时被挤掉的副本数;
+# 节点直接关机等**非自愿**故障不受 PDB 约束——那靠副本数与就绪探针兜底。
+# 单值可换成 minAvailable(整数或百分比),模板原样透传。
+pdb:
+  enabled: true
+  # public 多副本面: 同时最多驱逐 1 个,drain 期间始终有副本在服务
+  public:
+    maxUnavailable: 1
+  # admin 全局单副本: maxUnavailable 1 = 允许驱逐——单副本配 minAvailable: 1
+  # 会让节点 drain 永久卡死(无自愿中断可走),故 admin 面的 PDB 只作
+  # 「驱逐逐个来」的节流阀,不阻止维护
+  admin:
+    maxUnavailable: 1
+
 # 容器内应用监听端口(镜像默认 12345，可用 env PB_SERVER_PORT 覆盖后同步修改)
 containerPort: 12345
 
@@ -404,6 +419,20 @@ metrics:
     path: /metrics
     # namespace: monitoring
     labels: {}
+  # PrometheusRule 容量告警示例(#23): 需要 Prometheus Operator CRD
+  # (kube-prometheus-stack 等)——默认关,没有 CRD 的集群渲染会因
+  # "no matches for kind PrometheusRule" 而安装失败。
+  # 规则用的都是真实指标: kubelet_volume_stats*(节点抓取)与
+  # pb_upload_rejected_total{reason="quota|anon_quota"}(core /metrics)。
+  prometheusRule:
+    enabled: false
+    # namespace: monitoring
+    labels: {}
+    # PVC 可用比例阈值(0~1): 低于 warning 持续 30m → warning;低于 critical → critical
+    storageWarningRatio: 0.15
+    storageCriticalRatio: 0.05
+    # 配额拒绝速率(条/秒): quota/anon_quota 拒绝持续超阈 = 存储配额压力
+    quotaRejectRatePerSec: 0.1
 
 probes:
   liveness:

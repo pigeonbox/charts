@@ -164,6 +164,55 @@ jobs:
             || { echo "::error::默认渲染出现 redis-auth checksum(随机渲染值会导致每次 upgrade 都滚动)"; exit 1; }
           echo "✓ 显式密码轮换滚动 + 默认路径零滚动注解"
 
+      # #23①: 拆分模式 public/admin 双 PDB,selector 与两平面真实 Pod 标签逐字对齐
+      # (选不中 Pod 的 PDB 是静默 no-op);单副本默认零 PDB(会卡死节点 drain)。
+      # 变异负对照: 改错 admin selector 后本步必红(本地已验)。
+      - name: pdb dual-plane selectors match real pod labels
+        run: |
+          set -euo pipefail
+          if helm template pb charts/pigeonbox | grep -q 'kind: PodDisruptionBudget'; then
+            echo "::error::单副本默认渲染出 PDB(会卡死节点 drain)"; exit 1
+          fi
+          helm template pb charts/pigeonbox --set replicaCount=2 --show-only templates/pdb.yaml > /tmp/pdb.yaml
+          n=$(grep -c 'kind: PodDisruptionBudget' /tmp/pdb.yaml)
+          [ "$n" -eq 2 ] || { echo "::error::拆分模式应渲染 public/admin 双 PDB,实得 $n"; exit 1; }
+          helm template pb charts/pigeonbox --set replicaCount=2 --show-only templates/deployment.yaml > /tmp/pub.yaml
+          helm template pb charts/pigeonbox --set replicaCount=2 --show-only templates/admin-plane.yaml > /tmp/adm.yaml
+          pod_labels() { awk '/^  template:/{t=1} t&&/^      labels:/{g=1;next} g&&/^        [A-Za-z]/{print;next} g{exit}' "$1"; }
+          pub_labels=$(pod_labels /tmp/pub.yaml); adm_labels=$(pod_labels /tmp/adm.yaml)
+          [ -n "$pub_labels" ] && [ -n "$adm_labels" ] || { echo "::error::取不到两平面 Pod 标签"; exit 1; }
+          # 第 1 个 PDB=public、第 2 个=admin(模板顺序固定);取各自 matchLabels 块
+          sel_of() { awk -v want="$1" '/^---$/{d++;next}{if(d==0)d=1} d==want&&/^    matchLabels:/{g=1;next} d==want&&g&&/^      [a-z]/{print;next} d==want&&g{g=0}' /tmp/pdb.yaml; }
+          pub_sel=$(sel_of 1); adm_sel=$(sel_of 2)
+          [ -n "$pub_sel" ] && [ -n "$adm_sel" ] || { echo "::error::取不到 PDB selector"; exit 1; }
+          trim() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          echo "$pub_sel" | trim | while IFS= read -r kv; do [ -n "$kv" ] || continue; echo "$pub_labels" | trim | grep -qxF "$kv" || { echo "::error::public PDB selector [$kv] 不在 public Pod 标签里(静默 no-op)"; exit 1; }; done
+          echo "$adm_sel" | trim | while IFS= read -r kv; do [ -n "$kv" ] || continue; echo "$adm_labels" | trim | grep -qxF "$kv" || { echo "::error::admin PDB selector [$kv] 不在 admin Pod 标签里(静默 no-op)"; exit 1; }; done
+          # 两平面必须靠 component 区分(否则一个 PDB 会选中两组)
+          echo "$pub_sel" | grep -q 'component: server-public' || { echo "::error::public PDB selector 缺 component"; exit 1; }
+          echo "$adm_sel" | grep -q 'component: server-admin' || { echo "::error::admin PDB selector 缺 component"; exit 1; }
+          echo "✓ 双 PDB selector ↔ 两平面 Pod 标签已对齐"
+
+      # #23②: 容量告警规则挂 values 开关——默认不渲染(无 Prometheus Operator CRD
+      # 的集群渲染出会装不上);开启后规则必须引用真实指标。
+      # 变异负对照: 去掉 if 守卫后本步必红(本地已验)。
+      - name: storage alert rules behind values switch
+        run: |
+          set -euo pipefail
+          if helm template pb charts/pigeonbox | grep -q 'kind: PrometheusRule'; then
+            echo "::error::默认渲染 PrometheusRule(无 CRD 集群会安装失败)"; exit 1
+          fi
+          helm template pb charts/pigeonbox --set metrics.prometheusRule.enabled=true > /tmp/rule.yaml
+          grep -q 'kind: PrometheusRule' /tmp/rule.yaml || { echo "::error::开关开启后未渲染"; exit 1; }
+          for a in PigeonBoxPVCSpaceLow PigeonBoxPVCSpaceCritical PigeonBoxQuotaRejectionsSpike; do
+            grep -q "$a" /tmp/rule.yaml || { echo "::error::缺告警规则 $a"; exit 1; }
+          done
+          grep -q 'kubelet_volume_stats_available_bytes' /tmp/rule.yaml \
+            || { echo "::error::存储规则未引用 kubelet_volume_stats"; exit 1; }
+          grep -q 'reason=~"quota|anon_quota"' /tmp/rule.yaml \
+            || { echo "::error::配额规则未引用 pb_upload_rejected_total 的真实 label"; exit 1; }
+          echo "✓ 容量/配额告警规则 values 开关 + 真实指标引用"
+
       # 默认认证:密码默认开启,单点生成进 <fullname>-redis-auth,消费方全 secretKeyRef
       # (多模板各自 randAlphaNum 会互不一致 ⇒ 明文只允许出现在 Secret 模板里)
       - name: default install renders redis auth secret + networkpolicy

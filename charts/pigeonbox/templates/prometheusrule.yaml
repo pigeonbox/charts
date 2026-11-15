@@ -1,0 +1,48 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{/*存储容量/配额告警示例(#23): 关掉即不渲染。
+   kubelet_volume_stats 需节点指标抓取(kube-prometheus-stack 默认有);
+   pb_upload_rejected_total 是 core /metrics 的真实计数器,
+   reason=quota|anon_quota 见 core pkg/metrics/business.go。 */}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "pigeonbox.fullname" . }}
+  labels:
+    {{- include "pigeonbox.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.metrics.prometheusRule.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+spec:
+  groups:
+    - name: pigeonbox.storage
+      rules:
+        - alert: PigeonBoxPVCSpaceLow
+          expr: kubelet_volume_stats_available_bytes{namespace="{{ .Release.Namespace }}"} / kubelet_volume_stats_capacity_bytes{namespace="{{ .Release.Namespace }}"} < {{ .Values.metrics.prometheusRule.storageWarningRatio }}
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: PVC 可用空间低于 {{ .Values.metrics.prometheusRule.storageWarningRatio | mulf 100 | printf "%.0f" }}%
+            description: 命名空间 {{ .Release.Namespace }} 的 PVC 剩余空间不足,请扩容或清理过期取件码。
+        - alert: PigeonBoxPVCSpaceCritical
+          expr: kubelet_volume_stats_available_bytes{namespace="{{ .Release.Namespace }}"} / kubelet_volume_stats_capacity_bytes{namespace="{{ .Release.Namespace }}"} < {{ .Values.metrics.prometheusRule.storageCriticalRatio }}
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: PVC 可用空间低于 {{ .Values.metrics.prometheusRule.storageCriticalRatio | mulf 100 | printf "%.0f" }}%
+            description: 命名空间 {{ .Release.Namespace }} 的 PVC 即将写满,上传/取件将开始失败,立即处理。
+    - name: pigeonbox.quota
+      rules:
+        - alert: PigeonBoxQuotaRejectionsSpike
+          expr: sum(rate(pb_upload_rejected_total{reason=~"quota|anon_quota"}[10m])) > {{ .Values.metrics.prometheusRule.quotaRejectRatePerSec }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 配额类拒绝持续出现
+            description: 10 分钟内 quota/anon_quota 拒绝速率持续超过 {{ .Values.metrics.prometheusRule.quotaRejectRatePerSec }}/s,存储配额或日配额压力过大。
+{{- end }}
