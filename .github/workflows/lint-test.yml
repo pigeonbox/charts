@@ -77,6 +77,142 @@ jobs:
           grep -A20 'name: wait-redis' /tmp/rendered.yaml | grep -q 'REDISCLI_AUTH' \
             || { echo "wait-redis 缺少 REDISCLI_AUTH（密码开启时 init 将死等）"; exit 1; }
 
+      # #19: until 循环必须有最大重试次数——无上限时密码错/redis 挂 = init 静默死等,
+      # Pod 永卡 Init 且零报错。变异负对照:去掉 `-ge 60 ... exit 1` 后本步必红(本地已验)。
+      - name: wait-redis has retry cap and fails loudly
+        run: |
+          set -euo pipefail
+          helm template pb charts/pigeonbox > /tmp/wr.yaml
+          cmd=$(awk '/name: wait-redis/{f=1} f && /until redis-cli/{print; exit}' /tmp/wr.yaml)
+          [ -n "$cmd" ] || { echo "::error::取不到 wait-redis 的 until 命令"; exit 1; }
+          echo "$cmd" | grep -q 'ge 60' \
+            || { echo "::error::wait-redis until 循环缺少最大重试次数(60)——无上限即静默死等"; exit 1; }
+          echo "$cmd" | grep -q 'exit 1' \
+            || { echo "::error::wait-redis 超限未响亮失败(exit 1)"; exit 1; }
+          echo "✓ wait-redis 重试上限 + 响亮失败已渲染"
+
+      # #21: DB StatefulSet 容器必须补齐收紧基线(对齐 server/redis/p2p)——
+      # drop ALL 后 root 必挂(gosu/setgid EPERM,本地 docker 实测),故用镜像内 uid 直跑。
+      # 变异负对照:去掉任一容器 securityContext 后本步必红(本地已验)。
+      - name: db statefulsets carry hardened securityContext
+        run: |
+          set -euo pipefail
+          helm template pb charts/pigeonbox --set mysql.enabled=true --set postgresql.enabled=true \
+            --show-only templates/mysql.yaml --show-only templates/postgresql.yaml > /tmp/db.yaml
+          for spec in "mysql 999" "postgresql 70"; do
+            set -- $spec; db=$1; uid=$2
+            # 容器块 = "- name: <db>" 到其 "image:" 行(securityContext 夹在两者之间)
+            blk=$(awk -v n="- name: $db" '$0 ~ n {f=1} f{print} f && /image:/{exit}' /tmp/db.yaml)
+            [ -n "$blk" ] || { echo "::error::取不到 $db 容器块"; exit 1; }
+            echo "$blk" | grep -q 'runAsNonRoot: true' \
+              || { echo "::error::$db 缺 runAsNonRoot"; exit 1; }
+            echo "$blk" | grep -q "runAsUser: $uid" \
+              || { echo "::error::$db 缺 runAsUser: $uid(镜像内 uid 直跑)"; exit 1; }
+            echo "$blk" | grep -q 'allowPrivilegeEscalation: false' \
+              || { echo "::error::$db 缺 allowPrivilegeEscalation: false"; exit 1; }
+            echo "$blk" | grep -A1 'drop:' | grep -q 'ALL' \
+              || { echo "::error::$db capabilities 未 drop ALL"; exit 1; }
+          done
+          grep -q 'fsGroup: 999' /tmp/db.yaml \
+            || { echo "::error::mysql 缺 pod 级 fsGroup: 999(999 直跑卷不可写)"; exit 1; }
+          grep -q 'fsGroup: 70' /tmp/db.yaml \
+            || { echo "::error::postgresql 缺 pod 级 fsGroup: 70"; exit 1; }
+          echo "✓ mysql/postgresql 收紧基线已渲染"
+
+      # #22: p2p.adminPassword 必须落 Secret(secretKeyRef),渲染零明文——
+      # 明文 value 进 Pod spec/etcd/事件流,读 Pod 的 RBAC 通常比读 Secret 宽。
+      # 变异负对照: 改回 value: 明文后本步必红(本地已验)。
+      - name: p2p admin password lives in secret, not pod spec
+        run: |
+          set -euo pipefail
+          helm template pb charts/pigeonbox --set p2p.enabled=true \
+            --set p2p.adminPassword=litmus > /tmp/p2p.yaml
+          # b64 必须在(=落进 Secret data)
+          grep -q "$(printf litmus | base64)" /tmp/p2p.yaml \
+            || { echo "::error::p2p 口令未 base64 落进 Secret"; exit 1; }
+          # 反向: 渲染结果任何位置不得出现明文(b64 不含原文,可安全全文 grep)
+          ! grep -q 'litmus' /tmp/p2p.yaml \
+            || { echo "::error::p2p 口令以明文出现在渲染结果"; exit 1; }
+          # 消费方必须 secretKeyRef
+          grep -A8 'name: PB_P2P_ADMIN_PASSWORD' /tmp/p2p.yaml | grep -q 'secretKeyRef' \
+            || { echo "::error::PB_P2P_ADMIN_PASSWORD 未走 secretKeyRef"; exit 1; }
+          echo "✓ p2p 口令走 Secret,渲染零明文"
+
+      # #27: 显式密码轮换必须滚动 Pod——values-based checksum 注解(server+redis 双侧)。
+      # 反向断言: 默认(自动生成密码)渲染**不得**有任何 redis-auth checksum——
+      # 用 render 结果做 checksum 会因每次随机而每次都滚动(每条 upgrade 无谓重启)。
+      # 变异负对照: 注解改回 render 结果并去掉 if 守卫后本步必红(本地已验)。
+      - name: redis auth password rotation triggers rollout via values checksum
+        run: |
+          set -euo pipefail
+          want=$(printf rotated-a | sha256sum | cut -d' ' -f1)
+          helm template pb charts/pigeonbox --set redis.auth.password=rotated-a > /tmp/c1.yaml
+          # 双侧(server Pod 模板 + redis Pod 模板)都必须带同一 values-based 值
+          [ "$(grep -c "checksum/redis-auth: $want" /tmp/c1.yaml)" -ge 2 ] \
+            || { echo "::error::server/redis 双侧缺 checksum/redis-auth(或值非 sha256(密码))"; exit 1; }
+          # 同一密码两次渲染注解值恒定(值变才滚动的前提)
+          helm template pb charts/pigeonbox --set redis.auth.password=rotated-a > /tmp/c2.yaml
+          diff <(grep 'checksum/redis-auth' /tmp/c1.yaml) <(grep 'checksum/redis-auth' /tmp/c2.yaml) >/dev/null \
+            || { echo "::error::同密码两次渲染注解不一致(非 values-based)"; exit 1; }
+          # 换密码 ⇒ 注解值必须变(轮换触发滚动)
+          helm template pb charts/pigeonbox --set redis.auth.password=rotated-b > /tmp/c3.yaml
+          ! grep -q "checksum/redis-auth: $want" /tmp/c3.yaml \
+            || { echo "::error::换密码后注解值未变(轮换不滚动)"; exit 1; }
+          # 默认路径无显式密码: 不得出现任何 redis-auth checksum(防 render 随机 ⇒ 每次滚动)
+          helm template pb charts/pigeonbox > /tmp/c0.yaml
+          ! grep -q 'checksum/redis-auth' /tmp/c0.yaml \
+            || { echo "::error::默认渲染出现 redis-auth checksum(随机渲染值会导致每次 upgrade 都滚动)"; exit 1; }
+          echo "✓ 显式密码轮换滚动 + 默认路径零滚动注解"
+
+      # #23①: 拆分模式 public/admin 双 PDB,selector 与两平面真实 Pod 标签逐字对齐
+      # (选不中 Pod 的 PDB 是静默 no-op);单副本默认零 PDB(会卡死节点 drain)。
+      # 变异负对照: 改错 admin selector 后本步必红(本地已验)。
+      - name: pdb dual-plane selectors match real pod labels
+        run: |
+          set -euo pipefail
+          if helm template pb charts/pigeonbox | grep -q 'kind: PodDisruptionBudget'; then
+            echo "::error::单副本默认渲染出 PDB(会卡死节点 drain)"; exit 1
+          fi
+          helm template pb charts/pigeonbox --set replicaCount=2 --show-only templates/pdb.yaml > /tmp/pdb.yaml
+          n=$(grep -c 'kind: PodDisruptionBudget' /tmp/pdb.yaml)
+          [ "$n" -eq 2 ] || { echo "::error::拆分模式应渲染 public/admin 双 PDB,实得 $n"; exit 1; }
+          helm template pb charts/pigeonbox --set replicaCount=2 --show-only templates/deployment.yaml > /tmp/pub.yaml
+          helm template pb charts/pigeonbox --set replicaCount=2 --show-only templates/admin-plane.yaml > /tmp/adm.yaml
+          pod_labels() { awk '/^  template:/{t=1} t&&/^      labels:/{g=1;next} g&&/^        [A-Za-z]/{print;next} g{exit}' "$1"; }
+          pub_labels=$(pod_labels /tmp/pub.yaml); adm_labels=$(pod_labels /tmp/adm.yaml)
+          [ -n "$pub_labels" ] && [ -n "$adm_labels" ] || { echo "::error::取不到两平面 Pod 标签"; exit 1; }
+          # 第 1 个 PDB=public、第 2 个=admin(模板顺序固定);取各自 matchLabels 块
+          sel_of() { awk -v want="$1" '/^---$/{d++;next}{if(d==0)d=1} d==want&&/^    matchLabels:/{g=1;next} d==want&&g&&/^      [a-z]/{print;next} d==want&&g{g=0}' /tmp/pdb.yaml; }
+          pub_sel=$(sel_of 1); adm_sel=$(sel_of 2)
+          [ -n "$pub_sel" ] && [ -n "$adm_sel" ] || { echo "::error::取不到 PDB selector"; exit 1; }
+          trim() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          echo "$pub_sel" | trim | while IFS= read -r kv; do [ -n "$kv" ] || continue; echo "$pub_labels" | trim | grep -qxF "$kv" || { echo "::error::public PDB selector [$kv] 不在 public Pod 标签里(静默 no-op)"; exit 1; }; done
+          echo "$adm_sel" | trim | while IFS= read -r kv; do [ -n "$kv" ] || continue; echo "$adm_labels" | trim | grep -qxF "$kv" || { echo "::error::admin PDB selector [$kv] 不在 admin Pod 标签里(静默 no-op)"; exit 1; }; done
+          # 两平面必须靠 component 区分(否则一个 PDB 会选中两组)
+          echo "$pub_sel" | grep -q 'component: server-public' || { echo "::error::public PDB selector 缺 component"; exit 1; }
+          echo "$adm_sel" | grep -q 'component: server-admin' || { echo "::error::admin PDB selector 缺 component"; exit 1; }
+          echo "✓ 双 PDB selector ↔ 两平面 Pod 标签已对齐"
+
+      # #23②: 容量告警规则挂 values 开关——默认不渲染(无 Prometheus Operator CRD
+      # 的集群渲染出会装不上);开启后规则必须引用真实指标。
+      # 变异负对照: 去掉 if 守卫后本步必红(本地已验)。
+      - name: storage alert rules behind values switch
+        run: |
+          set -euo pipefail
+          if helm template pb charts/pigeonbox | grep -q 'kind: PrometheusRule'; then
+            echo "::error::默认渲染 PrometheusRule(无 CRD 集群会安装失败)"; exit 1
+          fi
+          helm template pb charts/pigeonbox --set metrics.prometheusRule.enabled=true > /tmp/rule.yaml
+          grep -q 'kind: PrometheusRule' /tmp/rule.yaml || { echo "::error::开关开启后未渲染"; exit 1; }
+          for a in PigeonBoxPVCSpaceLow PigeonBoxPVCSpaceCritical PigeonBoxQuotaRejectionsSpike; do
+            grep -q "$a" /tmp/rule.yaml || { echo "::error::缺告警规则 $a"; exit 1; }
+          done
+          grep -q 'kubelet_volume_stats_available_bytes' /tmp/rule.yaml \
+            || { echo "::error::存储规则未引用 kubelet_volume_stats"; exit 1; }
+          grep -q 'reason=~"quota|anon_quota"' /tmp/rule.yaml \
+            || { echo "::error::配额规则未引用 pb_upload_rejected_total 的真实 label"; exit 1; }
+          echo "✓ 容量/配额告警规则 values 开关 + 真实指标引用"
+
       # 默认认证:密码默认开启,单点生成进 <fullname>-redis-auth,消费方全 secretKeyRef
       # (多模板各自 randAlphaNum 会互不一致 ⇒ 明文只允许出现在 Secret 模板里)
       - name: default install renders redis auth secret + networkpolicy

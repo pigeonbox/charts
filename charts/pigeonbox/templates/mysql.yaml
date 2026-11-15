@@ -34,8 +34,23 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        fsGroup: 999   # mysql 镜像内 uid/gid=999,卷可写性由此保证(容器以 999 直跑,group 接写权)
       containers:
         - name: mysql
+          securityContext:
+            # 官方 mysql 镜像 entrypoint 默认 root(内部 gosu 降权),与 runAsNonRoot 冲突;
+            # 且 drop ALL 后 root 已无 CAP_SETUID/CAP_CHOWN ⇒ gosu/setgid 必失败
+            # (实测: setgid: Operation not permitted)⇒ 显式以镜像内 mysql(uid 999)直跑,
+            # 跳过 root 分支;卷可写性由 pod 级 fsGroup: 999 保证(实测 uid999+drop ALL
+            # 完成初始化并 ready for connections)
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           image: {{ .Values.mysql.image.repository }}:{{ .Values.mysql.image.tag | default "8.4" }}
           imagePullPolicy: {{ .Values.mysql.image.pullPolicy }}
           env:

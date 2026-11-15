@@ -1,0 +1,30 @@
+{{- $split := gt (int .Values.replicaCount) 1 }}
+{{- if and .Values.pdb.enabled $split }}
+{{/*拆分模式 public/admin 双面 PDB(#23): selector 与两平面**真实 Pod 标签**
+   逐字同源(server.selectorLabels),选不中 Pod 的 PDB 是静默 no-op。
+   仅拆分模式渲染——standalone 单副本配 minAvailable 会卡死节点 drain,
+   与 admin 面同理只作逐个驱逐的节流(见 values.yaml pdb 注释)。 */}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pigeonbox.server.fullname" (dict "root" . "plane" "public") }}
+  labels:
+    {{- include "pigeonbox.server.labels" (dict "root" . "plane" "public") | nindent 4 }}
+spec:
+  {{- toYaml .Values.pdb.public | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "pigeonbox.server.selectorLabels" (dict "root" . "plane" "public") | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pigeonbox.server.fullname" (dict "root" . "plane" "admin") }}
+  labels:
+    {{- include "pigeonbox.server.labels" (dict "root" . "plane" "admin") | nindent 4 }}
+spec:
+  {{- toYaml .Values.pdb.admin | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "pigeonbox.server.selectorLabels" (dict "root" . "plane" "admin") | nindent 6 }}
+{{- end }}

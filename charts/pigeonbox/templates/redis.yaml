@@ -34,6 +34,11 @@ spec:
       {{- include "pigeonbox.data.selectorLabels" (dict "component" "redis" "Release" .Release "Values" .Values "Chart" .Chart "Template" .Template) | nindent 6 }}
   template:
     metadata:
+      {{- /* #27: 显式密码轮换 → redis Pod 滚动以应用新 requirepass(server 侧同注解) */}}
+      {{- if .Values.redis.auth.password }}
+      annotations:
+        checksum/redis-auth: {{ .Values.redis.auth.password | sha256sum }}
+      {{- end }}
       labels:
         {{- include "pigeonbox.data.selectorLabels" (dict "component" "redis" "Release" .Release "Values" .Values "Chart" .Chart "Template" .Template) | nindent 8 }}
     spec:

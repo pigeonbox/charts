@@ -220,6 +220,10 @@ Redis 认证 Secret 名:密码默认开启后的**单点真相源**。
 {{- printf "%s-p2p" (include "pigeonbox.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/* P2P 管理端口令 Secret 名(#22): 明文只存在于 p2p-secret.yaml 一个模板 */}}
+{{- define "pigeonbox.p2p.adminSecretName" -}}
+{{- printf "%s-admin" (include "pigeonbox.p2p.fullname" .) }}{{- end }}
+
 {{/*
 数据面组件选择器标签(name 带 -<组件> 后缀)
 */}}
