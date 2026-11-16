@@ -1579,36 +1579,6 @@ entries:
         - name: docs
           url: https://github.com/pigeonbox/pigeonbox
     apiVersion: v2
-    appVersion: v5.9.0
-    created: "2026-11-16T19:05:32.289737244Z"
-    description: pigeonbox 文件快递柜 — 匿名口令分享文本/文件（前后端分离部署：frontend nginx 静态+反代 / server
-      API）
-    digest: db1b8348e9af1aeaf65eb32a80ebd4f21a23de008e6685b25cc32a5a85fe511c
-    home: https://github.com/pigeonbox/pigeonbox
-    keywords:
-    - file-sharing
-    - pastebin
-    - pigeonbox
-    kubeVersion: '>=1.22.0-0'
-    maintainers:
-    - name: pigeonbox
-      url: https://github.com/orgs/pigeonbox
-    name: pigeonbox
-    sources:
-    - https://github.com/pigeonbox/server
-    - https://github.com/pigeonbox/pigeonbox
-    type: application
-    urls:
-    - https://github.com/pigeonbox/charts/releases/download/pigeonbox-2.0.136/pigeonbox-2.0.136.tgz
-    version: 2.0.136
-  - annotations:
-      artifacthub.io/license: Apache-2.0
-      artifacthub.io/links: |
-        - name: source
-          url: https://github.com/pigeonbox/server
-        - name: docs
-          url: https://github.com/pigeonbox/pigeonbox
-    apiVersion: v2
     appVersion: v5.8.0
     created: "2026-11-15T12:32:30.687767847Z"
     description: pigeonbox 文件快递柜 — 匿名口令分享文本/文件（前后端分离部署：frontend nginx 静态+反代 / server
