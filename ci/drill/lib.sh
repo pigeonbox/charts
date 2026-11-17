@@ -11,6 +11,13 @@
 #   DRILL_CLUSTER  kind 集群名        默认 pb-drill
 #   DRILL_NS       命名空间            默认 fcb-ci
 #   DRILL_RELEASE  helm release 名     默认 fcb
+#
+# CI 入口：.github/workflows/drill.yml（夜间定时 + workflow_dispatch）。
+#   流水线只做「装工具 → 备 ghcr 凭据 → 依次跑 01~04 → 汇总」，集群/镜像/安装
+#   一律由本库自举（幂等，可重复跑）⇒ 断言的唯一真相源在脚本里，不在 workflow 里。
+#   ⚠️ DRILL_* 的默认值不可随意改：演练 01 的「无 Pending Pod」断言写死了
+#      app.kubernetes.io/instance=fcb（chart 的 instance 标签 = helm release 名），
+#      改 release 名会选不中任何 Pod ⇒ 断言静默假绿。
 set -euo pipefail
 
 DRILL_CLUSTER="${DRILL_CLUSTER:-pb-drill}"

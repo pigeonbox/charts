@@ -20,6 +20,8 @@
 # 前置：docker + kind + kubectl + helm；集群/镜像/安装由 lib 自举（幂等）。
 # 用法: ci/drill/03-upload-pod-migration.sh
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 NS="$DRILL_NS"
@@ -83,7 +85,7 @@ echo "══ 2) 迁移：force-delete server pod ══"
 old_pod=$(kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl -n "$NS" delete po "$old_pod" --force --grace-period=0 >/dev/null
-ok "已 force-delete $old_pod（模拟上传中 Pod 迁移）"
+ok "已 force-delete ${old_pod}（模拟上传中 Pod 迁移）"
 for i in $(seq 1 60); do
   if kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
     -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="pigeonbox")].ready}' 2>/dev/null \
@@ -126,6 +128,6 @@ echo "$cmp_body" | grep -q '"code":0' || fail "complete 失败: ${cmp_body:0:200
 share_code=$(echo "$cmp_body" | sed -n 's/.*"share_code":"\([^"]*\)".*/\1/p')
 [ -n "$share_code" ] && [ "$share_code" != "$UPLOAD_ID" ] \
   || fail "complete 未返回真实 share_code: ${cmp_body:0:200}"
-ok "complete 成功 share_code=$share_code（跨迁移的分片会话完整闭环）"
+ok "complete 成功 share_code=${share_code}（跨迁移的分片会话完整闭环）"
 
 echo "✅ 场景③（上传中 Pod 迁移）通过"
