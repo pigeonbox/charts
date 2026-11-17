@@ -75,6 +75,42 @@ chart `version` 未变化的 push 不会重复发布。
 
 仓库首次发布后需确认 GitHub Pages 已启用：Settings → Pages → Source = `gh-pages` branch / `/(root)`。
 
+## 故障演练（kind 真集群）
+
+[![Kind Failure Drill](https://github.com/pigeonbox/charts/actions/workflows/drill.yml/badge.svg)](https://github.com/pigeonbox/charts/actions/workflows/drill.yml)
+
+`ci/drill/` 下是四个**真集群**故障演练脚本（2026-11-16 PR #32 交付）——在 kind 单节点集群里真把服务打挂，再断言「不雪崩 / 能自愈 / 会话不丢 / 能回滚」：
+
+| 脚本 | 场景 | 断言要点 |
+|---|---|---|
+| `01-redis-unavailable.sh` | Redis 不可用 | force-delete 后自动重建；scale 0 持续 60s 期间 server/frontend **零重启**、`/api/config` 仍 200、匿名分享降级成功、liveness 失败 <3 |
+| `02-node-termination.sh` | 节点终止 | `kubectl drain` 驱逐 ⇒ 业务 Pod Pending（单副本脆弱性实证）+ 断流，uncordon 后自愈；`docker stop` 节点 ⇒ 集群失联，`docker start` ⇒ 回 Ready 自愈 |
+| `03-upload-pod-migration.sh` | 上传中 Pod 迁移 | 上传中 force-delete server Pod ⇒ **同一 upload_id 位图不丢**（会话在共享存储）⇒ 补传 ⇒ complete 返回单一 share_code |
+| `04-canary-rollback.sh` | 灰度升级与回滚 | 换镜像 tag 滚动（断流窗口 ≤90s）；坏 tag ⇒ `ErrImagePull`/`ImagePullBackOff` 不伪装就绪；`helm rollback` 恢复 |
+
+### 怎么跑
+
+**本地手工跑**（前置：docker + kind + kubectl + helm。集群、镜像预载、chart 安装由脚本自举，幂等，可重复跑）：
+
+```bash
+bash ci/drill/01-redis-unavailable.sh   # 一次跑一个；四个都要就依次跑
+```
+
+- 集群名/命名空间/release 由 `DRILL_CLUSTER`（默认 `pb-drill`）、`DRILL_NS`（默认 `fcb-ci`）、`DRILL_RELEASE`（默认 `fcb`）控制——**别改默认值**：脚本 01 的断言写死了 `app.kubernetes.io/instance=fcb`，改 release 名会选不中 Pod 而假绿。
+- 需能拉 `ghcr.io/pigeonbox/{server,frontend}` 与 `redis:7-alpine`；镜像没发布时脚本在「镜像预载」处报 `镜像拉取失败: <ref>`。
+
+**夜间 CI**：`.github/workflows/drill.yml` 每日 03:17 UTC（= 11:17 CST）自动跑全部四个；也可在 Actions 页手动 `workflow_dispatch`：
+
+- `drills`：选 `all` 或单个场景（`01`/`02`/`03`/`04`）；
+- `allow_failure`：默认 `false`——**任一演练失败 ⇒ workflow 变红**（这是演练存在的意义）；显式置 `true` 才只收集结果不判红。
+
+**失败怎么定位**：
+
+1. 先看「**演练结果汇总**」步骤——四个场景各一行（状态 + 退出码），一眼看出是哪场挂了；
+2. 失败时紧邻的「**演练失败诊断**」步骤已留好现场：Pod 列表、events、Pod describe/logs、`helm history`；
+3. 脚本自身的失败点以 `::error::…` 打在日志里（`fail()` 原语），末尾 `✅ 场景N（…）通过` 是最后一道绿；
+4. 常见原因：① chart 的 appVersion 镜像还没发布（CI 先等 20 分钟，仍不到就红并跳过演练）② ghcr 上的旧镜像被清理 ③ runner 资源不足导致 Pod Pending。
+
 ## License
 
 [Apache-2.0](LICENSE)

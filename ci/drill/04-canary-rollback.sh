@@ -13,11 +13,15 @@
 # 前置：docker + kind + kubectl + helm；集群/镜像/安装由 lib 自举（幂等）。
 # 用法: ci/drill/04-canary-rollback.sh
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 NS="$DRILL_NS"
 REL="$DRILL_RELEASE"
-TAG_BASE=$(drill_app_tag)          # 5.8.0
+TAG_BASE=$(drill_app_tag)          # 基线 = Chart.yaml appVersion（当前 6.1.0）
+# ⚠️ TAG_NEXT 写死成一个**真实已发布**的 tag（ghcr.io/pigeonbox/server:5.7.0 必须还在）：
+#    演练靠它触发一次「换镜像 tag 的滚动」；该 tag 被清理或未发布 ⇒ 预载失败 ⇒ 演练红。
 TAG_NEXT="5.7.0"                   # 「新版本」：与基线不同的真实已发布 tag
 TAG_BAD="0.0.0-drill-not-exist"    # 必拉取失败的 tag（制造失败升级）
 
@@ -63,7 +67,7 @@ ok "baseline: revision=$BASE_REV image=$BASE_IMG"
 api_via_frontend || fail "baseline 前端链路 API 不通"
 ok "baseline 前端链路 API 通"
 
-echo "══ 2) 灰度升级 $TAG_BASE → $TAG_NEXT（滚动期间流量守护） ══"
+echo "══ 2) 灰度升级 $TAG_BASE → ${TAG_NEXT}（滚动期间流量守护） ══"
 : > "$FLOW_LOG"
 (
   while true; do
@@ -116,7 +120,7 @@ if helm upgrade "$REL" "$CHART" -n "$NS" \
 fi
 ok "坏镜像升级按预期失败（--wait 超时拒绝就绪）"
 ST=$(helm history "$REL" -n "$NS" --max 1 2>/dev/null | tail -1 | awk -F'\t' '{print $3}')
-[ "$ST" = failed ] || echo "  ⚠️ 最新 revision STATUS=$ST（期望 failed；helm 对 --wait 超时的标记依版本而异）"
+[ "$ST" = failed ] || echo "  ⚠️ 最新 revision STATUS=${ST}（期望 failed；helm 对 --wait 超时的标记依版本而异）"
 # 坏副本必须停在拉取失败态（不能伪装就绪）
 if ! kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
   -o jsonpath='{range .items[*]}{.status.containerStatuses[?(@.name=="pigeonbox")].state.waiting.reason}{" "}{end}' \
@@ -130,7 +134,7 @@ helm rollback "$REL" -n "$NS" >/dev/null || fail "helm rollback 失败"
 drill_wait_ready
 IMG_RB=$(current_image)
 [ "$IMG_RB" = "ghcr.io/pigeonbox/server:$TAG_NEXT" ] \
-  || fail "回滚后镜像应恢复 $TAG_NEXT，实得 $IMG_RB"
+  || fail "回滚后镜像应恢复 ${TAG_NEXT}，实得 $IMG_RB"
 ok "回滚后镜像恢复 $TAG_NEXT"
 api_via_frontend_wait || fail "回滚后前端链路 API 不通（30s 未恢复）"
 ok "回滚后前端链路 API 通"

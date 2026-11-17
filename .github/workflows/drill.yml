@@ -1,0 +1,258 @@
+name: Kind Failure Drill
+
+# kind 真集群故障演练的**唯一执行入口**。
+#
+# 为什么此前没跑（关单≠已清偿）：
+#   2026-11-16 PR #32 交付了 ci/drill/ 四个故障演练脚本，commit 自述「本机跑过 EXIT=0」，
+#   但**全仓没有任何 CI 引用它们**——charts 仓只有 lint-test.yml，其 step 清单里没有一条
+#   指向 ci/drill/。一次性手工跑 ≠ 回归防护：脚本会随 chart 改动、镜像 tag 变动、
+#   helm 大版本改输出格式而**静默腐烂**，等到真出事时才发现演练早就失效了。
+#   本工作流把它们接进夜间定时 ⇒ 腐烂当天变红，而不是关单那天就已烂掉。
+#
+# 为什么**不**挂 pull_request：
+#   lint-test.yml 的注释已写明「PR 路径不跑镜像预载」（预载要拉 ghcr 镜像、耗时十余分钟、
+#   还要镜像凭据）⇒ 真集群演练属重活，走夜间 + 手工触发。
+#
+# 脚本是真相源：集群自举 / 镜像预载 / 安装 / 断言全在 ci/drill/*.sh 里，
+# 本文件只负责「装工具 → 备凭据 → 依次跑 → 汇总」，不复制任何演练逻辑。
+
+on:
+  workflow_dispatch:
+    inputs:
+      drills:
+        description: '跑哪几个演练（schedule 恒跑全部）'
+        type: choice
+        default: all
+        options:
+          - all
+          - '01' # Redis 不可用
+          - '02' # 节点终止
+          - '03' # 上传中 Pod 迁移
+          - '04' # 灰度升级与回滚
+      allow_failure:
+        description: '允许演练失败（只收集结果，不把本次运行判红）'
+        type: boolean
+        default: false
+  schedule:
+    # 每日 03:17 UTC = 11:17 CST：避开整点/半点（GH 定时任务高峰排队严重），
+    # 也避开生态发车窗（chart bump 与镜像 publish 几乎同时，整点前后最容易撞上）。
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+  packages: read # 演练要拉 ghcr.io/pigeonbox/{server,frontend}
+
+concurrency:
+  group: charts-kind-drill
+  # 夜间任务排队执行：既不叠加（省 runner 额度），也不互相取消（被取消那次没人看结果）。
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    name: kind 故障演练
+    runs-on: ubuntu-latest
+    # 4 个演练 × 各自 step timeout + 工具安装/等镜像 的上限 ≈ 145 分钟，留 35 分钟余量。
+    timeout-minutes: 180
+    env:
+      # 与 ci/drill/lib.sh 的默认值必须一致：演练脚本 01 的「无 Pending Pod」断言写死了
+      # app.kubernetes.io/instance=fcb，改 release 名会静默选不中 Pod ⇒ 断言假绿。
+      # 演练脚本 02/03/04 用的是 $DRILL_RELEASE-pigeonbox{-frontend,-redis} 这套部署名。
+      DRILL_CLUSTER: pb-drill
+      DRILL_NS: fcb-ci
+      DRILL_RELEASE: fcb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5
+        with:
+          # 钉死 v4：演练脚本 04 用 'helm history' 的制表符分隔表格解析 revision
+          # （helm v4 改了 history 输出格式，脚本就是按 v4 调的）。
+          # helm v4.3.0 = 脚本被验证通过的那个版本（get.helm.sh 可下载，已核对 sha256sum）。
+          version: v4.3.0
+
+      - name: Install kind + kubectl
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          # 只装工具、不建集群：集群由 ci/drill/lib.sh 的 drill_ensure_cluster 自举
+          # （幂等，与脚本本地跑法完全一致）。
+          install_only: true
+
+      - name: Registry login (ghcr.io)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          set -uo pipefail
+          # GITHUB_TOKEN（packages: read）用于 ghcr 登录；演练镜像本身是 public 包，
+          # 登录失败不阻断（匿名也能拉）——真拉不动时会在演练里报「镜像拉取失败」。
+          if printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin; then
+            echo "✓ ghcr.io 登录成功（GITHUB_TOKEN / packages: read）"
+          else
+            echo "::warning::ghcr.io 登录失败，继续（演练镜像是 public 包，可匿名拉取）"
+          fi
+
+      - name: Resolve drill selection
+        id: sel
+        env:
+          DRILL_SEL: ${{ inputs.drills }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          sel="${DRILL_SEL:-}"
+          # schedule 事件没有 inputs ⇒ 恒跑全部四个。
+          if [ "$EVENT_NAME" = 'schedule' ] || [ -z "$sel" ]; then
+            sel=all
+          fi
+          echo "本次演练选择：$sel"
+          echo "value=$sel" >>"$GITHUB_OUTPUT"
+
+      - name: Wait for drill images to be published
+        id: wait
+        run: |
+          set -uo pipefail
+          # chart bump 与镜像 publish 几乎同时（lint-test.yml 的注释记录了这段竞态：
+          # 「多架构镜像 qemu 交叉构建要 10-30 分钟」），演练镜像此时还没进 registry ⇒
+          # 拉取必失败 ⇒ 假红。这里等它发布，最长 20 分钟；仍不到就红并跳过演练。
+          tag=$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2; exit}' charts/pigeonbox/Chart.yaml)
+          tag=${tag#v}
+          wait_image() {
+            local ref="$1"
+            local n=40
+            while [ "$n" -gt 0 ]; do
+              if docker pull -q "$ref" >/dev/null 2>&1; then
+                echo "  ✓ $ref"
+                return 0
+              fi
+              n=$((n - 1))
+              sleep 30
+            done
+            return 1
+          }
+          for image in server frontend; do
+            ref="ghcr.io/pigeonbox/${image}:${tag}"
+            echo "等待 $ref 可拉取…"
+            if ! wait_image "$ref"; then
+              echo "::error::$ref 20 分钟内未发布——对应 server/frontend 的 Release 未跑或失败"
+              echo "ready=false" >>"$GITHUB_OUTPUT"
+              exit 1
+            fi
+          done
+          echo "ready=true" >>"$GITHUB_OUTPUT"
+
+      - name: 场景① Redis 不可用（force-delete 后自动重建；scale 0 ⇒ 零重启 + 降级可用）
+        id: drill01
+        if: always() && steps.wait.outputs.ready == 'true' && (steps.sel.outputs.value == 'all' || steps.sel.outputs.value == '01')
+        # 只有显式 allow_failure 才放过失败；否则失败 = 整个 workflow 变红（演练存在的意义）。
+        continue-on-error: ${{ inputs.allow_failure == true }}
+        # 脚本内部观测窗口最长 ~12 分钟（60s 故障窗 + 多次 180s 等待 + helm --wait 6m×3 重试）。
+        timeout-minutes: 30
+        run: |
+          set -uo pipefail
+          bash ci/drill/01-redis-unavailable.sh
+          code=$?
+          echo "exit_code=$code" >>"$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: 场景② 节点终止（drain 驱逐 + 节点容器 stop/start ⇒ 自愈）
+        id: drill02
+        if: always() && steps.wait.outputs.ready == 'true' && (steps.sel.outputs.value == 'all' || steps.sel.outputs.value == '02')
+        continue-on-error: ${{ inputs.allow_failure == true }}
+        timeout-minutes: 30
+        run: |
+          set -uo pipefail
+          bash ci/drill/02-node-termination.sh
+          code=$?
+          echo "exit_code=$code" >>"$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: 场景③ 上传中 Pod 迁移（分片会话不丢 ⇒ 续传 ⇒ complete 单一 share_code）
+        id: drill03
+        if: always() && steps.wait.outputs.ready == 'true' && (steps.sel.outputs.value == 'all' || steps.sel.outputs.value == '03')
+        continue-on-error: ${{ inputs.allow_failure == true }}
+        timeout-minutes: 30
+        run: |
+          set -uo pipefail
+          bash ci/drill/03-upload-pod-migration.sh
+          code=$?
+          echo "exit_code=$code" >>"$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: 场景④ 灰度升级与回滚（坏镜像 tag ⇒ ErrImagePull 不伪装就绪 ⇒ 回滚恢复）
+        id: drill04
+        if: always() && steps.wait.outputs.ready == 'true' && (steps.sel.outputs.value == 'all' || steps.sel.outputs.value == '04')
+        continue-on-error: ${{ inputs.allow_failure == true }}
+        # 本场景额外多一次镜像预载 + 一次成功升级(6m) + 一次失败升级(2m) + 两次回滚 ⇒ 给足。
+        timeout-minutes: 40
+        run: |
+          set -uo pipefail
+          bash ci/drill/04-canary-rollback.sh
+          code=$?
+          echo "exit_code=$code" >>"$GITHUB_OUTPUT"
+          exit "$code"
+
+      - name: 演练失败诊断（现场留存）
+        if: always() && (steps.drill01.outcome == 'failure' || steps.drill02.outcome == 'failure' || steps.drill03.outcome == 'failure' || steps.drill04.outcome == 'failure')
+        run: |
+          set -uo pipefail
+          echo "════════ 演练失败诊断 ════════"
+          echo "──────── 集群 ────────"
+          kubectl cluster-info 2>&1 || true
+          kubectl get nodes -o wide 2>&1 || true
+          echo "──────── 命名空间 $DRILL_NS ────────"
+          kubectl -n "$DRILL_NS" get deploy,sts,po -o wide 2>&1 || true
+          echo "──────── events ────────"
+          kubectl -n "$DRILL_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -40 || true
+          for p in $(kubectl -n "$DRILL_NS" get po -o name 2>/dev/null); do
+            echo "──────── $p ────────"
+            kubectl -n "$DRILL_NS" describe "$p" 2>&1 | sed -n '/^Events:/,$p' || true
+            kubectl -n "$DRILL_NS" logs "$p" --all-containers --init-containers --tail=50 2>&1 || true
+          done
+          echo "──────── helm history ($DRILL_RELEASE) ────────"
+          helm history "$DRILL_RELEASE" -n "$DRILL_NS" 2>&1 || true
+
+      - name: Cleanup kind cluster
+        if: always()
+        run: |
+          set -uo pipefail
+          # kind-action 用了 install_only ⇒ 它的 post 步骤不删集群；
+          # 演练自建的 pb-drill 集群在这里回收（runner 本是临时的，但省磁盘）。
+          kind delete cluster --name "$DRILL_CLUSTER" || true
+
+      - name: 演练结果汇总
+        if: always()
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+          ALLOW_FAILURE: ${{ inputs.allow_failure }}
+        run: |
+          set -uo pipefail
+          echo "### 演练结果汇总"
+          echo
+          echo "| 演练 | 状态 | 退出码 |"
+          echo "| --- | --- | --- |"
+          failed=0
+          for id in drill01 drill02 drill03 drill04; do
+            outcome=$(printf '%s' "$STEPS_JSON" | jq -r --arg id "$id" '.[$id].outcome // "skipped"')
+            code=$(printf '%s' "$STEPS_JSON" | jq -r --arg id "$id" '.[$id].outputs.exit_code // "-"')
+            case "$outcome" in
+              success) status='✅ 通过' ;;
+              failure)
+                status='❌ 失败'
+                failed=1
+                ;;
+              skipped) status='⏭️ 跳过' ;;
+              *) status="$outcome" ;;
+            esac
+            echo "| $id | $status | $code |"
+          done
+          echo
+          if [ "$failed" = 1 ]; then
+            echo "::error::至少一个演练失败——见上表，以及『演练失败诊断』步骤留存的现场"
+            if [ "$ALLOW_FAILURE" = "true" ]; then
+              echo "::warning::allow_failure=true ⇒ 本次运行不判红（显式放行）"
+              exit 0
+            fi
+            exit 1
+          fi
+          echo "✓ 所选演练全部通过"

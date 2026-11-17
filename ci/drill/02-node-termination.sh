@@ -16,6 +16,8 @@
 # 前置：docker + kind + kubectl + helm；集群/镜像/安装由 lib 自举（幂等）。
 # 用法: ci/drill/02-node-termination.sh
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 NS="$DRILL_NS"
@@ -36,7 +38,7 @@ NODE=$(kind get nodes --name "$DRILL_CLUSTER" | head -1)
 
 echo "══ 1) baseline ══"
 api_ok || fail "baseline 前端链路 API 不通"
-ok "baseline API 通（单节点 $NODE，业务 pod 全在其上）"
+ok "baseline API 通（单节点 ${NODE}，业务 pod 全在其上）"
 
 echo "══ A) 优雅驱逐：drain 节点 ══"
 # 单节点 drain：evict 后无节点可调度 ⇒ pod Pending。drain 会等待 pod 消失而卡住，
@@ -63,7 +65,7 @@ ok "节点驱逐期间服务断流（单副本的真实后果）"
 echo "══ A-恢复) uncordon → 自愈 ══"
 kubectl uncordon "$NODE" >/dev/null
 kubectl -n "$NS" rollout status deploy/"$REL-pigeonbox" --timeout=180s >/dev/null \
-  || uncordon_ok=1
+  || true
 for i in $(seq 1 30); do
   if api_ok; then break; fi
   sleep 2

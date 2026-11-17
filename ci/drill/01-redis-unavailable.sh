@@ -14,6 +14,8 @@
 # 前置：docker + kind + kubectl + helm；集群/镜像/安装由 lib 自举（幂等）。
 # 用法: ci/drill/01-redis-unavailable.sh
 set -euo pipefail
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 NS="$DRILL_NS"
@@ -32,7 +34,7 @@ redis_pod=$(kubectl -n "$NS" get po -l app.kubernetes.io/name=pigeonbox-redis \
   -o jsonpath='{.items[0].metadata.name}')
 [ -n "$redis_pod" ] || fail "找不到 redis Pod"
 kubectl -n "$NS" delete po "$redis_pod" --force --grace-period=0 >/dev/null
-ok "已 force-delete $redis_pod（模拟突然终止）"
+ok "已 force-delete ${redis_pod}（模拟突然终止）"
 # RS 重建有延迟：先等新 Pod 出现（kubectl wait 对空 selector 会直接报错）
 for i in $(seq 1 60); do
   if kubectl -n "$NS" get po -l app.kubernetes.io/name=pigeonbox-redis -o name 2>/dev/null | grep -q .; then
@@ -55,12 +57,12 @@ sleep 60
 # a) 不雪崩：server/frontend 零重启且仍 Running
 restarts_after=$(server_restart_count)
 [ "$restarts_after" = "$restarts_before" ] \
-  || fail "server 在 redis 下线期间重启了: $restarts_before → $restarts_after（雪崩）"
+  || fail "server 在 redis 下线期间重启了: $restarts_before → ${restarts_after}（雪崩）"
 if kubectl -n "$NS" get po -l app.kubernetes.io/instance=fcb \
   -o jsonpath='{range .items[*]}{.status.phase}{" "}{end}' | grep -q Pending; then
   fail "有 Pod 进入 Pending（资源/调度异常）"
 fi
-ok "server 零重启（restarts=$restarts_after），无 Pending Pod"
+ok "server 零重启（restarts=${restarts_after}），无 Pending Pod"
 
 # b) 读路径降级仍可服务（配置走进程内缓存，不因 redis 断供而 5xx）
 drill_api_ok "redis 下线期间"
