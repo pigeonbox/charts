@@ -211,7 +211,9 @@ jobs:
           for p in $(kubectl -n "$DRILL_NS" get po -o name 2>/dev/null); do
             echo "──────── $p ────────"
             kubectl -n "$DRILL_NS" describe "$p" 2>&1 | sed -n '/^Events:/,$p' || true
-            kubectl -n "$DRILL_NS" logs "$p" --all-containers --init-containers --tail=50 2>&1 || true
+            # ⚠️ 不能用 `kubectl logs --init-containers`：那个旗标不存在于
+            # 演练 runner 的 kubectl ⇒ 诊断 step 自己先炸 ⇒ 失败现场一条日志都没有。
+            bash ci/drill/dump-pod-logs.sh "$DRILL_NS" "$p" 50 || true
           done
           echo "──────── helm history ($DRILL_RELEASE) ────────"
           helm history "$DRILL_RELEASE" -n "$DRILL_NS" 2>&1 || true

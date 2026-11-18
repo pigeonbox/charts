@@ -77,7 +77,11 @@ if printf '%s\n' "$PUBLISHED" | grep -qx "$TAG_BAD"; then
   fail "TAG_BAD=$TAG_BAD 竟然在已发布集合里 ⇒ 失败升级场景失去意义"
 fi
 
-SERVER_IMAGE="$(drill_server_image)" || fail "chart 未给出 server 镜像（values.yaml 的 image.repository）"
+# ⚠️ **只取仓库名**（不取 chart 的 tag）：本场景要把镜像换成 TAG_NEXT
+#   ⇒ 用 drill_server_image（返回完整引用 repo:chartTag）再拼 :$TAG_NEXT
+#   会得到「repo:chartTag:TAG_NEXT」这种**非法引用** ⇒ 预载必失败
+#   （2026-11-18 夜间演练红实录：ghcr.io/pigeonbox/server:6.8.0:6.9.0）。
+SERVER_REPO="$(drill_image_repo image.repository)" || fail "chart 未给出 server 镜像仓库（values.yaml 的 image.repository）"
 
 log_info "══ 版本解析 ══"
 ok "基线版本 TAG_BASE=$TAG_BASE（Chart.yaml appVersion）"
@@ -121,7 +125,7 @@ FLOW_LOG=$(mktemp)
 log_info "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
 drill_ensure_cluster
 drill_preload_images
-drill_preload_one "$SERVER_IMAGE:$TAG_NEXT" # 灰度目标版本镜像
+drill_preload_one "$SERVER_REPO:$TAG_NEXT" # 灰度目标版本镜像（仓库名 + 目标 tag）
 drill_install
 
 log_info "══ 1) baseline ══"
@@ -153,7 +157,7 @@ kill "$FLOW_PID" 2>/dev/null || true
 wait "$FLOW_PID" 2>/dev/null || true
 
 IMG_NOW=$(current_image)
-[ "$IMG_NOW" = "$SERVER_IMAGE:$TAG_NEXT" ] ||
+[ "$IMG_NOW" = "$SERVER_REPO:$TAG_NEXT" ] ||
   fail "升级后镜像未切到 $TAG_NEXT: $IMG_NOW"
 ok "镜像已切到 $TAG_NEXT"
 [ "$(current_revision)" != "$BASE_REV" ] || fail "revision 未推进"
@@ -201,7 +205,7 @@ log_info "══ 4) 回滚（helm rollback → 上一成功 revision） ══"
 helm rollback "$REL" -n "$NS" >/dev/null || fail "helm rollback 失败"
 drill_wait_ready
 IMG_RB=$(current_image)
-[ "$IMG_RB" = "$SERVER_IMAGE:$TAG_NEXT" ] ||
+[ "$IMG_RB" = "$SERVER_REPO:$TAG_NEXT" ] ||
   fail "回滚后镜像应恢复 ${TAG_NEXT}，实得 $IMG_RB"
 ok "回滚后镜像恢复 $TAG_NEXT"
 api_via_frontend_wait || fail "回滚后前端链路 API 不通（30s 未恢复）"
