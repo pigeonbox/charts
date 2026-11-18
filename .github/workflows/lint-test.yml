@@ -62,6 +62,20 @@ jobs:
           shellcheck --version | head -2
           bash ci/drill/lint-shell-scripts.sh --selfcheck
 
+      # ── 镜像引用形态门禁（04 灰度回滚场景）────────────────────────────
+      # 为什么要这道门禁：2026-11-18 夜间演练红实录——04 场景把
+      #   drill_server_image 的**完整引用**（repo:tag）又拼了一个 ":$TAG_NEXT"
+      # ⇒ 得到 ghcr.io/pigeonbox/server:6.8.0:6.9.0 这种**非法引用**
+      # ⇒ 镜像预载必失败 ⇒ 演练红。可错误文案是「镜像拉取失败: …」，
+      #   看着像「镜像没发布」，实则是**引用拼错** ⇒ 排查方向被带偏一整晚。
+      # 口径：门禁从 04 **源码**里取出它真正使用的镜像引用表达式并求值
+      #   （不自己重拼一份——重拼等于查自己的推导，04 改坏也不红）；
+      #   --selfcheck 会把 04 改回历史缺陷形态，确认门禁能转红（判据有牙齿）。
+      - name: Image reference gate (04 场景镜像引用形态) — 含负对照自证
+        run: |
+          set -uo pipefail
+          bash ci/drill/check-image-ref.sh --selfcheck
+
       # PR:ct 按变更检测跑 lint+install；
       # push 到 main:ct 的变更检测以 target-branch(=HEAD) 为基线恒空,曾 0 秒空跑、
       # kind 冒烟从未真正执行(--since 对其 version-bump 检查语义也不符,0.2.7 误报)——
@@ -392,7 +406,8 @@ jobs:
             for p in $(kubectl -n "$ns" get po -o name); do
               echo "──────── $p ────────"
               kubectl -n "$ns" describe "$p" | sed -n '/^Events:/,$p' || true
-              kubectl -n "$ns" logs "$p" --all-containers --init-containers --tail=50 || true
+              # ⚠️ 不能用 `kubectl logs --init-containers`：旗标不存在 ⇒ 诊断 step 自己先炸。
+              bash ci/drill/dump-pod-logs.sh "$ns" "$p" 50 || true
             done
           done
 

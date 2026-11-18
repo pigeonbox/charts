@@ -129,6 +129,21 @@ drill_redis_image() {
   printf '%s:%s\n' "$repo" "$tag"
 }
 
+# 镜像的**仓库名部分**（不含 tag）：给「同一仓库、换 tag」的用法拼引用。
+#
+# ⚠️ **为什么需要它**（2026-11-18 夜间演练红实录）：
+#   drill_server_image 返回的是**完整引用**（repo:tag，tag 来自 chart values/appVersion）
+#   ⇒ 04 场景若再拼「:$TAG_NEXT」（灰度目标版本）就得到
+#   ghcr.io/pigeonbox/server:6.8.0:6.9.0 —— 这样的**非法引用** ⇒ 预载必失败
+#   （错误文案「镜像拉取失败: ghcr.io/pigeonbox/server:6.8.0:6.9.0」看着像
+#   「镜像没发布」，实则是**引用拼错**，排查方向被带偏了一整晚）。
+# ⇒ 这里只出仓库名，由调用方自己拼目标 tag ⇒ 拼错的可能形态被消灭在源头。
+drill_image_repo() { # <点分键> → stdout: 仓库名（不含 tag）；取不到返回 1
+  local repo
+  repo=$(drill_chart_value "$1")
+  [ -n "$repo" ] || return 1
+  printf '%s\n' "$repo"
+}
 # 集群：不存在则创建；存在则复用（幂等）
 drill_ensure_cluster() {
   if ! kind get clusters 2>/dev/null | grep -qx "$DRILL_CLUSTER"; then
