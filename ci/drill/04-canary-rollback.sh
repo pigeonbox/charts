@@ -3,27 +3,95 @@
 #
 # 对齐评审原文「helm upgrade 改镜像版本 → 就绪探针切流 → 失败回滚，写成可重复脚本」：
 #   1. baseline：记录 helm revision + server 镜像 + 前端链路 API；
-#   2. 灰度升级 5.8.0 → 5.7.0（换镜像 tag 触发滚动；期间后台流量守护经
+#   2. 灰度升级 基线 → 目标版本（换镜像 tag 触发滚动；期间后台流量守护经
 #      frontend nginx → server Service 的真实链路，断言无连续断流）；
 #   3. 失败升级：换到不存在的镜像 tag → --wait 必失败（预期红）；
-#   4. helm rollback：断言镜像回 5.7.0、rollout Complete、API 恢复；
-#   5. 回滚到 baseline revision：恢复 5.8.0 基线。
+#   4. helm rollback：断言镜像回目标版本、rollout Complete、API 恢复；
+#   5. 回滚到 baseline revision：恢复基线版本。
+#
+# 版本一律**参数化**（此前 TAG_NEXT 写死成 5.7.0 ⇒ 生态版本前进后演练永远对着
+# 老版本打：要么跑在旧版本上，要么镜像被清理后直接红）：
+#   TAG_BASE  基线版本，默认 = Chart.yaml appVersion；
+#   TAG_NEXT  灰度目标版本，默认 = 与基线不同的**真实已发布**版本；
+#   TAG_PREV  显式指定「上一个已发布版本」（优先级低于 TAG_NEXT）；
+#   TAG_BAD   故意拉不到的坏镜像 tag，默认 0.0.0-drill-not-exist。
+#   取值规则与失败语义见 lib.sh 的「已发布版本解析」段与 ci/drill/README.md。
 #
 # 滚动语义：strategy 用 K8s 默认（单副本 maxSurge=1/maxUnavailable=0 ⇒ 先起新后删旧）。
 # 前置：docker + kind + kubectl + helm；集群/镜像/安装由 lib 自举（幂等）。
-# 用法: ci/drill/04-canary-rollback.sh
+# 用法: ci/drill/04-canary-rollback.sh [--resolve-only]
+#   --resolve-only：只解析并断言版本（不建集群、不跑演练）——CI/本地自检用。
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
+RESOLVE_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --resolve-only) RESOLVE_ONLY=1 ;;
+    *)
+      echo "用法: $0 [--resolve-only]" >&2
+      exit 2
+      ;;
+  esac
+done
+
 NS="$DRILL_NS"
 REL="$DRILL_RELEASE"
-TAG_BASE=$(drill_app_tag) # 基线 = Chart.yaml appVersion（当前 6.1.0）
-# ⚠️ TAG_NEXT 写死成一个**真实已发布**的 tag（ghcr.io/pigeonbox/server:5.7.0 必须还在）：
-#    演练靠它触发一次「换镜像 tag 的滚动」；该 tag 被清理或未发布 ⇒ 预载失败 ⇒ 演练红。
-TAG_NEXT="5.7.0"                # 「新版本」：与基线不同的真实已发布 tag
-TAG_BAD="0.0.0-drill-not-exist" # 必拉取失败的 tag（制造失败升级）
+
+# ── 版本解析（写死 ⇒ 演练永远对着老版本打；取不到 ⇒ 响亮失败）────────────
+TAG_BASE="${TAG_BASE:-$(drill_app_tag)}"
+TAG_BASE="${TAG_BASE#v}"
+printf '%s' "$TAG_BASE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+  fail "TAG_BASE 格式非法: $TAG_BASE（期望 X.Y.Z）"
+
+# 已发布版本集合（真实已发布 ⇒ ghcr.io/pigeonbox/{server,frontend}:<ver> 两个镜像都在）
+PUBLISHED="$(drill_published_versions)"
+[ -n "$PUBLISHED" ] ||
+  fail "取不到任何已发布版本（仓库 tag + 远端 release tag 都读不到）——不猜、不兜底写死值"
+
+TAG_NEXT_SRC=""
+if [ -n "${TAG_NEXT:-}" ]; then
+  TAG_NEXT_SRC="环境变量 TAG_NEXT"
+  TAG_NEXT="${TAG_NEXT#v}"
+elif [ -n "${TAG_PREV:-}" ]; then
+  TAG_NEXT_SRC="环境变量 TAG_PREV（上一个已发布版本）"
+  TAG_NEXT="${TAG_PREV#v}"
+else
+  TAG_NEXT_SRC="自动解析（与基线不同的最近已发布版本）"
+  TAG_NEXT="$(drill_resolve_peer_version "$TAG_BASE" "$PUBLISHED")" ||
+    fail "解析不出与基线 $TAG_BASE 不同的已发布版本——不猜、不兜底写死值"
+fi
+
+# 自证：格式合法 / ≠ 基线 / 真实已发布 —— 三条断言缺一不可
+printf '%s' "$TAG_NEXT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+  fail "TAG_NEXT 格式非法: $TAG_NEXT（期望 X.Y.Z）"
+[ "$TAG_NEXT" != "$TAG_BASE" ] ||
+  fail "TAG_NEXT 必须与基线不同（都是 $TAG_BASE ⇒ 换 tag 触发不了滚动）"
+printf '%s\n' "$PUBLISHED" | grep -qx "$TAG_NEXT" ||
+  fail "TAG_NEXT=$TAG_NEXT 不是真实已发布版本（已发布集合里没有它）——演练只打真实发布过的 tag"
+
+TAG_BAD="${TAG_BAD:-0.0.0-drill-not-exist}"
+if printf '%s\n' "$PUBLISHED" | grep -qx "$TAG_BAD"; then
+  fail "TAG_BAD=$TAG_BAD 竟然在已发布集合里 ⇒ 失败升级场景失去意义"
+fi
+
+SERVER_IMAGE="$(drill_server_image)" || fail "chart 未给出 server 镜像（values.yaml 的 image.repository）"
+
+echo "══ 版本解析 ══"
+ok "基线版本 TAG_BASE=$TAG_BASE（Chart.yaml appVersion）"
+ok "灰度目标 TAG_NEXT=$TAG_NEXT（来源：$TAG_NEXT_SRC）"
+ok "坏镜像 TAG_BAD=$TAG_BAD（必须拉不到）"
+ok "已发布版本数=$(printf '%s\n' "$PUBLISHED" | grep -c .)；最近若干：$(printf '%s\n' "$PUBLISHED" | head -5 | tr '\n' ' ')"
+if ! printf '%s\n' "$PUBLISHED" | grep -qx "$TAG_BASE"; then
+  echo "  ⚠️ 基线版本 $TAG_BASE 不在已发布集合里（chart appVersion 可能刚 bump、镜像还没发布）"
+fi
+
+if [ "$RESOLVE_ONLY" -eq 1 ]; then
+  echo "✓ 版本解析通过（--resolve-only：只解析不跑演练）"
+  exit 0
+fi
 
 current_image() {
   kubectl -n "$NS" get deploy "$REL-pigeonbox" \
@@ -56,7 +124,7 @@ FLOW_LOG=$(mktemp)
 echo "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
 drill_ensure_cluster
 drill_preload_images
-drill_preload_one "ghcr.io/pigeonbox/server:$TAG_NEXT" # 灰度目标版本镜像
+drill_preload_one "$SERVER_IMAGE:$TAG_NEXT" # 灰度目标版本镜像
 drill_install
 
 echo "══ 1) baseline ══"
@@ -82,13 +150,13 @@ helm upgrade "$REL" "$CHART" -n "$NS" \
   --set image.tag="$TAG_NEXT" --wait --timeout 6m ||
   {
     kill "$FLOW_PID" 2>/dev/null || true
-    fail "灰度升级失败（5.7.0 应可正常滚动）"
+    fail "灰度升级失败（$TAG_NEXT 应可正常滚动）"
   }
 kill "$FLOW_PID" 2>/dev/null || true
 wait "$FLOW_PID" 2>/dev/null || true
 
 IMG_NOW=$(current_image)
-[ "$IMG_NOW" = "ghcr.io/pigeonbox/server:$TAG_NEXT" ] ||
+[ "$IMG_NOW" = "$SERVER_IMAGE:$TAG_NEXT" ] ||
   fail "升级后镜像未切到 $TAG_NEXT: $IMG_NOW"
 ok "镜像已切到 $TAG_NEXT"
 [ "$(current_revision)" != "$BASE_REV" ] || fail "revision 未推进"
@@ -136,7 +204,7 @@ echo "══ 4) 回滚（helm rollback → 上一成功 revision） ══"
 helm rollback "$REL" -n "$NS" >/dev/null || fail "helm rollback 失败"
 drill_wait_ready
 IMG_RB=$(current_image)
-[ "$IMG_RB" = "ghcr.io/pigeonbox/server:$TAG_NEXT" ] ||
+[ "$IMG_RB" = "$SERVER_IMAGE:$TAG_NEXT" ] ||
   fail "回滚后镜像应恢复 ${TAG_NEXT}，实得 $IMG_RB"
 ok "回滚后镜像恢复 $TAG_NEXT"
 api_via_frontend_wait || fail "回滚后前端链路 API 不通（30s 未恢复）"

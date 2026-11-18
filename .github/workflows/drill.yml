@@ -63,6 +63,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # 演练 04 的灰度目标版本从「真实已发布 tag」解析 ⇒ 检出形态必须是全量
+          # （浅克隆不带 tag ⇒ 本仓 tag 来源为空，只能退回远端 release tag 源）。
+          fetch-depth: 0
 
       - name: Set up Helm
         uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5

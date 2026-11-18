@@ -35,6 +35,33 @@ jobs:
       - name: Set up chart-testing
         uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
 
+      # ── shell 脚本门禁（shfmt 格式 + shellcheck 正确性）────────────────────
+      # 为什么现在才有：2026-11-18 实测 ci/drill/ 五个脚本**全部**不合 shfmt
+      # （shfmt -l -i 2 -ci 全量点名），而本仓此前**没有任何格式门禁**
+      # （Lint and Test Charts 一直是绿的）⇒ 格式基线持续漂移，review 里排版噪声
+      # 淹没逻辑 diff。同一批脚本还把灰度目标版本**写死**成 5.7.0 ⇒ 演练永远对着
+      # 老版本打。两件事一起治：格式一次拉干净 + 本门禁防回潮。
+      #
+      # 为什么放这一档（重活之前）：kind 集群 + 镜像预载要十几分钟；格式/正确性问题
+      # 应当秒级暴露，不该让 PR 白等 runner 额度。
+      #
+      # 口径与生态 hub 仓 scripts/check-shfmt.sh 同款：
+      #   · shfmt -i 2 -ci，版本**钉死 v3.14.1**（不同 minor 输出可能不同 ⇒
+      #     浮动版本会让门禁时红时绿）；
+      #   · shellcheck -x，0 告警；
+      #   · --selfcheck：门禁自证（负对照）——干净⇒绿、注入格式漂移⇒红并点名、
+      #     注入 shellcheck 错误⇒红并点名、还原⇒绿、零覆盖⇒红。
+      - name: Shell lint gate (shfmt -i 2 -ci + shellcheck) — 含负对照自证
+        run: |
+          set -uo pipefail
+          go version
+          go install mvdan.cc/sh/v3/cmd/shfmt@v3.14.1
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          shfmt --version
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --version | head -2
+          bash ci/drill/lint-shell-scripts.sh --selfcheck
+
       # PR:ct 按变更检测跑 lint+install；
       # push 到 main:ct 的变更检测以 target-branch(=HEAD) 为基线恒空,曾 0 秒空跑、
       # kind 冒烟从未真正执行(--since 对其 version-bump 检查语义也不符,0.2.7 误报)——
