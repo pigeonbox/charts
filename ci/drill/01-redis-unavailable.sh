@@ -21,33 +21,31 @@ source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 NS="$DRILL_NS"
 REDIS_DEPLOY="$DRILL_RELEASE-pigeonbox-redis"
 
-echo "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
+log_info "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
 drill_ensure_cluster
 drill_preload_images
 drill_install
 
-echo "══ 1) baseline ══"
+log_info "══ 1) baseline ══"
 drill_api_ok "baseline"
 
-echo "══ 2) 突然终止：force-delete redis Pod → 自动重建 ══"
+log_info "══ 2) 突然终止：force-delete redis Pod → 自动重建 ══"
 redis_pod=$(kubectl -n "$NS" get po -l app.kubernetes.io/name=pigeonbox-redis \
   -o jsonpath='{.items[0].metadata.name}')
 [ -n "$redis_pod" ] || fail "找不到 redis Pod"
 kubectl -n "$NS" delete po "$redis_pod" --force --grace-period=0 >/dev/null
 ok "已 force-delete ${redis_pod}（模拟突然终止）"
 # RS 重建有延迟：先等新 Pod 出现（kubectl wait 对空 selector 会直接报错）
-for i in $(seq 1 60); do
-  if kubectl -n "$NS" get po -l app.kubernetes.io/name=pigeonbox-redis -o name 2>/dev/null | grep -q .; then
-    break
-  fi
-  sleep 3
-done
+# ⚠️ 等价替换：原为「for i in $(seq 1 60) + sleep 3」（最多 180s）⇒ DELAY=3/BACKOFF=1。
+#   原实现**超时后不判失败**（由下一条 kubectl wait 的 fail 判红）⇒ `|| true` 保持该语义。
+SHELLKIT_RETRY_DELAY=3 SHELLKIT_RETRY_BACKOFF=1 retry 60 kubectl -n "$NS" get po \
+  -l app.kubernetes.io/name=pigeonbox-redis -o name 2>/dev/null | grep -q . || true
 kubectl -n "$NS" wait --for=condition=Ready pod \
   -l app.kubernetes.io/name=pigeonbox-redis --timeout=180s >/dev/null ||
   fail "redis Pod 未在 180s 内自动重建回 Ready"
 ok "redis Pod 自动重建回 Ready"
 
-echo "══ 3) 持续不可用：scale 到 0，观察 60s ══"
+log_info "══ 3) 持续不可用：scale 到 0，观察 60s ══"
 restarts_before=$(server_restart_count)
 kubectl -n "$NS" scale deploy "$REDIS_DEPLOY" --replicas=0 >/dev/null
 fault_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -83,7 +81,7 @@ if kubectl -n "$NS" logs "$(server_pod)" -c pigeonbox --since=4m 2>/dev/null |
   grep -qiE 'redis.*(failed to dial|connection refused|timeout)'; then
   ok "server 日志有 redis 连接失败信号（降级可观测）"
 else
-  echo "  ⚠️ 窗口内未见 redis 失败日志（pool 后台日志非周期保证，非静默假活证据）"
+  log_warn "  ⚠️ 窗口内未见 redis 失败日志（pool 后台日志非周期保证，非静默假活证据）"
 fi
 
 # d) liveness 失败次数 < failureThreshold(3)：不进入杀 pod 循环
@@ -92,7 +90,7 @@ live_fails=$(drill_unhealthy_since "$fault_at" "Liveness")
   fail "下线窗口内 liveness 失败 $live_fails 次 ≥ 3（会触发重启循环）"
 ok "窗口内 liveness 失败 $live_fails 次 < 3（未触发重启循环）"
 
-echo "══ 4) 恢复：scale 回 1 ══"
+log_info "══ 4) 恢复：scale 回 1 ══"
 kubectl -n "$NS" scale deploy "$REDIS_DEPLOY" --replicas=1 >/dev/null
 kubectl -n "$NS" rollout status deploy "$REDIS_DEPLOY" --timeout=180s >/dev/null ||
   fail "redis 恢复后未回 Ready"
@@ -102,4 +100,4 @@ drill_api_ok "恢复后"
   fail "恢复后 server 重启次数与故障前不一致（全程应零重启）"
 ok "全程 server 零重启"
 
-echo "✅ 场景①（Redis 不可用）通过"
+log_ok "✅ 场景①（Redis 不可用）通过"

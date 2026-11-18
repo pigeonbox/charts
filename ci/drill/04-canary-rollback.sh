@@ -79,13 +79,13 @@ fi
 
 SERVER_IMAGE="$(drill_server_image)" || fail "chart 未给出 server 镜像（values.yaml 的 image.repository）"
 
-echo "══ 版本解析 ══"
+log_info "══ 版本解析 ══"
 ok "基线版本 TAG_BASE=$TAG_BASE（Chart.yaml appVersion）"
 ok "灰度目标 TAG_NEXT=$TAG_NEXT（来源：$TAG_NEXT_SRC）"
 ok "坏镜像 TAG_BAD=$TAG_BAD（必须拉不到）"
 ok "已发布版本数=$(printf '%s\n' "$PUBLISHED" | grep -c .)；最近若干：$(printf '%s\n' "$PUBLISHED" | head -5 | tr '\n' ' ')"
 if ! printf '%s\n' "$PUBLISHED" | grep -qx "$TAG_BASE"; then
-  echo "  ⚠️ 基线版本 $TAG_BASE 不在已发布集合里（chart appVersion 可能刚 bump、镜像还没发布）"
+  log_warn "  ⚠️ 基线版本 $TAG_BASE 不在已发布集合里（chart appVersion 可能刚 bump、镜像还没发布）"
 fi
 
 if [ "$RESOLVE_ONLY" -eq 1 ]; then
@@ -110,24 +110,21 @@ api_via_frontend() {
 }
 
 # rollback/滚动后 endpoint 同步有延迟：轮询直到通（30s 上限）
+# ⚠️ 等价替换：原为「for i in $(seq 1 15) + sleep 2」（最多 30s）⇒ DELAY=2/BACKOFF=1。
+#   原实现返回 1（未通）⇒ 调用方据此判红；`retry` 返回被重试命令的退出码（也是非 0）⇒ 等价。
 api_via_frontend_wait() {
-  local i
-  for i in $(seq 1 15); do
-    if api_via_frontend; then return 0; fi
-    sleep 2
-  done
-  return 1
+  SHELLKIT_RETRY_DELAY=2 SHELLKIT_RETRY_BACKOFF=1 retry 15 api_via_frontend
 }
 
 FLOW_LOG=$(mktemp)
 
-echo "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
+log_info "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
 drill_ensure_cluster
 drill_preload_images
 drill_preload_one "$SERVER_IMAGE:$TAG_NEXT" # 灰度目标版本镜像
 drill_install
 
-echo "══ 1) baseline ══"
+log_info "══ 1) baseline ══"
 BASE_REV=$(current_revision)
 BASE_IMG=$(current_image)
 [ -n "$BASE_REV" ] && [ -n "$BASE_IMG" ] || fail "取不到 baseline revision/image"
@@ -135,7 +132,7 @@ ok "baseline: revision=$BASE_REV image=$BASE_IMG"
 api_via_frontend || fail "baseline 前端链路 API 不通"
 ok "baseline 前端链路 API 通"
 
-echo "══ 2) 灰度升级 $TAG_BASE → ${TAG_NEXT}（滚动期间流量守护） ══"
+log_info "══ 2) 灰度升级 $TAG_BASE → ${TAG_NEXT}（滚动期间流量守护） ══"
 : >"$FLOW_LOG"
 (
   while true; do
@@ -183,7 +180,7 @@ for i in 1 2 3 4 5; do
 done
 ok "滚动后连续 5 次探测全通（切流完成且稳定）"
 
-echo "══ 3) 失败升级：坏镜像 tag（预期 helm --wait 失败） ══"
+log_info "══ 3) 失败升级：坏镜像 tag（预期 helm --wait 失败） ══"
 if helm upgrade "$REL" "$CHART" -n "$NS" \
   -f "$CHART/ci/config-overlay-values.yaml" \
   --set image.tag="$TAG_BAD" --wait --timeout 2m >/tmp/drill04-bad.log 2>&1; then
@@ -200,7 +197,7 @@ if ! kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
 fi
 ok "坏镜像 Pod 停在 ErrImagePull/ImagePullBackOff（未伪装就绪）"
 
-echo "══ 4) 回滚（helm rollback → 上一成功 revision） ══"
+log_info "══ 4) 回滚（helm rollback → 上一成功 revision） ══"
 helm rollback "$REL" -n "$NS" >/dev/null || fail "helm rollback 失败"
 drill_wait_ready
 IMG_RB=$(current_image)
@@ -210,7 +207,7 @@ ok "回滚后镜像恢复 $TAG_NEXT"
 api_via_frontend_wait || fail "回滚后前端链路 API 不通（30s 未恢复）"
 ok "回滚后前端链路 API 通"
 
-echo "══ 5) 回滚到 baseline（恢复 $TAG_BASE 基线） ══"
+log_info "══ 5) 回滚到 baseline（恢复 $TAG_BASE 基线） ══"
 helm rollback "$REL" "$BASE_REV" -n "$NS" >/dev/null || fail "回滚到 baseline revision 失败"
 drill_wait_ready
 IMG_FIN=$(current_image)
@@ -220,4 +217,4 @@ api_via_frontend_wait || fail "恢复后前端链路 API 不通（30s 未恢复�
 ok "恢复后前端链路 API 通"
 
 rm -f "$FLOW_LOG"
-echo "✅ 场景④（灰度升级/回滚）通过"
+log_ok "✅ 场景④（灰度升级/回滚）通过"
