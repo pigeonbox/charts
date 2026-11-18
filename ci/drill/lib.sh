@@ -27,12 +27,16 @@ DRILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$DRILL_DIR/../.." && pwd)"
 CHART="$REPO_ROOT/charts/pigeonbox"
 
-fail() { echo "::error::$*" >&2; exit 1; }
-ok()   { echo "  ✓ $*"; }
+fail() {
+  echo "::error::$*" >&2
+  exit 1
+}
+ok() { echo "  ✓ $*"; }
 
 drill_arch() {
-  local a; a=$(uname -m)
-  case "$a" in x86_64) echo amd64 ;; aarch64|arm64) echo arm64 ;; *) echo "$a" ;; esac
+  local a
+  a=$(uname -m)
+  case "$a" in x86_64) echo amd64 ;; aarch64 | arm64) echo arm64 ;; *) echo "$a" ;; esac
 }
 
 drill_app_tag() {
@@ -53,18 +57,20 @@ drill_ensure_cluster() {
 # 单镜像预载：docker pull（本平台）→ 节点内 ctr import pin 平台（幂等，重复导入无害）
 drill_preload_one() {
   local ref="$1"
-  local node; node=$(kind get nodes --name "$DRILL_CLUSTER" | head -1)
+  local node
+  node=$(kind get nodes --name "$DRILL_CLUSTER" | head -1)
   docker pull -q "$ref" >/dev/null || fail "镜像拉取失败: $ref"
   docker save "$ref" | docker exec -i "$node" \
     ctr --namespace=k8s.io images import --platform "linux/$(drill_arch)" \
-      --digests --snapshotter=overlayfs - >/dev/null \
-    || fail "镜像预载失败: $ref"
+    --digests --snapshotter=overlayfs - >/dev/null ||
+    fail "镜像预载失败: $ref"
   ok "预载 $ref"
 }
 
 # 预载默认三镜像（appVersion tag 的 server/frontend + redis）
 drill_preload_images() {
-  local tag; tag=$(drill_app_tag)
+  local tag
+  tag=$(drill_app_tag)
   drill_preload_one "ghcr.io/pigeonbox/server:$tag"
   drill_preload_one "ghcr.io/pigeonbox/frontend:$tag"
   drill_preload_one "redis:7-alpine"
@@ -80,7 +86,8 @@ drill_install() {
       break
     fi
     [ "$i" -lt 3 ] || fail "helm install/upgrade 连续 3 次失败"
-    echo "  ! helm 瞬时失败，10s 后重试 ($i/2)"; sleep 10
+    echo "  ! helm 瞬时失败，10s 后重试 ($i/2)"
+    sleep 10
   done
   drill_wait_ready
 }
@@ -89,12 +96,13 @@ drill_install() {
 drill_wait_ready() {
   local t="${1:-180s}" i
   for i in 1 2 3; do
-    if kubectl -n "$DRILL_NS" rollout status deploy -l app.kubernetes.io/component=server --timeout="$t" >/dev/null \
-      && kubectl -n "$DRILL_NS" rollout status deploy -l app.kubernetes.io/name=pigeonbox-frontend --timeout="$t" >/dev/null; then
+    if kubectl -n "$DRILL_NS" rollout status deploy -l app.kubernetes.io/component=server --timeout="$t" >/dev/null &&
+      kubectl -n "$DRILL_NS" rollout status deploy -l app.kubernetes.io/name=pigeonbox-frontend --timeout="$t" >/dev/null; then
       return 0
     fi
     [ "$i" -lt 3 ] || fail "deployment 未在重试后回 Ready"
-    echo "  ! rollout 等待失败，10s 后重试 ($i/2)"; sleep 10
+    echo "  ! rollout 等待失败，10s 后重试 ($i/2)"
+    sleep 10
   done
 }
 
@@ -114,8 +122,8 @@ drill_api_ok() {
   local label="${1:-api}"
   local out
   out=$(kubectl -n "$DRILL_NS" exec "$(server_pod)" -c pigeonbox -- \
-    sh -c 'wget -qO- --timeout=8 http://127.0.0.1:12345/api/config' 2>&1) \
-    || fail "[$label] /api/config 请求失败: $out"
+    sh -c 'wget -qO- --timeout=8 http://127.0.0.1:12345/api/config' 2>&1) ||
+    fail "[$label] /api/config 请求失败: $out"
   echo "$out" | grep -q '"code":0' || fail "[$label] /api/config 业务码非 0: ${out:0:200}"
   ok "[$label] /api/config 业务码 0"
 }
