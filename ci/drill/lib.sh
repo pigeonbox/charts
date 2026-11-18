@@ -24,18 +24,35 @@
 #      改 release 名会选不中任何 Pod ⇒ 断言静默假绿。
 set -euo pipefail
 
+# ── shellkit（CI 侧统一管道；**设备侧脚本一律不引**，见 C1） ───────────────
+# third_party/shellkit 是上游镜像（由 hub 侧 scripts/vendor-shellkit.sh 物化）⇒ **勿手改**。
+# ⚠️ 落点是 third_party/ 而不是 vendor/：Go ≥1.14 见到**模块根**下有 vendor/ 就默认切
+#    vendor 模式 ⇒ 缺 vendor/modules.txt ⇒ go build 报 "inconsistent vendoring"（实测现红）。
+# ⚠️ 本库被 01~04 场景脚本 source ⇒ 库路径必须相对**本文件**解析，不能依赖调用方的 cwd。
+DRILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$DRILL_DIR/../.." && pwd)"
+. "$REPO_ROOT/third_party/shellkit/lib/bootstrap.sh"
+export SHELLKIT_LANG="${SHELLKIT_LANG:-zh_CN}" # 库内消息走中文，与生态输出一致
+
 DRILL_CLUSTER="${DRILL_CLUSTER:-pb-drill}"
 DRILL_NS="${DRILL_NS:-fcb-ci}"
 DRILL_RELEASE="${DRILL_RELEASE:-fcb}"
-DRILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$DRILL_DIR/../.." && pwd)"
 CHART="$REPO_ROOT/charts/pigeonbox"
 
+# ── 断言原语 ────────────────────────────────────────────────────────────
+# ⚠️ **失败出口必须逐字保留两件事**：
+#   ① `::error::` 注解**必须在行首** —— 它是 **GitHub Actions 的错误注解**
+#      （workflow 的 Annotations 里能看到 ⇒ 不是普通日志）。
+#      ⚠️ **不能用 shellkit 的 `log_error` 打这个注解**：它会加 `[ERROR] ` 前缀 ⇒
+#      `::error::` 不在行首 ⇒ **Actions 认不出来**（注解静默失效 ⇒ CI 上失败原因消失）。
+#      ⇒ 这里用 `printf` 直接打到 stderr，逐字保持原形态。
+#   ② 失败退出码仍是 1（drill workflow 按非 0 判场景失败）。
 fail() {
-  echo "::error::$*" >&2
+  printf '::error::%s\n' "$*" >&2
   exit 1
 }
-ok() { echo "  ✓ $*"; }
+# ⚠️ `ok()` 用 shellkit 的 log_ok（日志一律 stderr，stdout 只给数据）。
+ok() { log_ok "$*"; }
 
 drill_arch() {
   local a
@@ -115,10 +132,10 @@ drill_redis_image() {
 # 集群：不存在则创建；存在则复用（幂等）
 drill_ensure_cluster() {
   if ! kind get clusters 2>/dev/null | grep -qx "$DRILL_CLUSTER"; then
-    echo "→ 创建 kind 集群 $DRILL_CLUSTER"
+    log_info "创建 kind 集群 $DRILL_CLUSTER"
     kind create cluster --name "$DRILL_CLUSTER" --wait 120s || fail "kind 集群创建失败"
   else
-    echo "→ 复用已有 kind 集群 $DRILL_CLUSTER"
+    log_info "复用已有 kind 集群 $DRILL_CLUSTER"
   fi
   kubectl config use-context "kind-$DRILL_CLUSTER" >/dev/null
 }
@@ -158,7 +175,7 @@ drill_install() {
       break
     fi
     [ "$i" -lt 3 ] || fail "helm install/upgrade 连续 3 次失败"
-    echo "  ! helm 瞬时失败，10s 后重试 ($i/2)"
+    log_warn "helm 瞬时失败，10s 后重试 ($i/2)"
     sleep 10
   done
   drill_wait_ready
@@ -173,7 +190,7 @@ drill_wait_ready() {
       return 0
     fi
     [ "$i" -lt 3 ] || fail "deployment 未在重试后回 Ready"
-    echo "  ! rollout 等待失败，10s 后重试 ($i/2)"
+    log_warn "rollout 等待失败，10s 后重试 ($i/2)"
     sleep 10
   done
 }

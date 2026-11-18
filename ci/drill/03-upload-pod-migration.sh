@@ -39,12 +39,12 @@ fjson() { # 取业务码（0=成功）
   fcurl "$@" 2>/dev/null | sed -n 's/.*"code":\([0-9-]*\).*/\1/p' | head -1
 }
 
-echo "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
+log_info "══ 0) 自举：集群 + 镜像预载 + 安装 ══"
 drill_ensure_cluster
 drill_preload_images
 drill_install
 
-echo "══ 1) 造分片会话：init + 传 2/3 片 ══"
+log_info "══ 1) 造分片会话：init + 传 2/3 片 ══"
 # frontend pod 内生成 3×1MB 随机片 + 整文件 sha256
 kubectl -n "$NS" exec deploy/"$REL-pigeonbox-frontend" -- sh -c '
   head -c 1048576 /dev/urandom > /tmp/dc0
@@ -81,17 +81,20 @@ st_body=$(fcurl "http://127.0.0.1:8080/chunk/upload/status/$UPLOAD_ID")
 echo "$st_body" | grep -q '"uploaded_chunks":2' || fail "status 应报 2 片: ${st_body:0:200}"
 ok "status 位图=2"
 
-echo "══ 2) 迁移：force-delete server pod ══"
+log_info "══ 2) 迁移：force-delete server pod ══"
 old_pod=$(kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl -n "$NS" delete po "$old_pod" --force --grace-period=0 >/dev/null
 ok "已 force-delete ${old_pod}（模拟上传中 Pod 迁移）"
-for i in $(seq 1 60); do
-  if kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
+# 等 server 新 pod 的容器 ready（判据函数化，避免 retry 里嵌套引号）
+# ⚠️ 等价替换：原为「for i in $(seq 1 60) + sleep 3」（最多 180s）⇒ DELAY=3/BACKOFF=1。
+#   原实现超时后不判失败，由随后的 `new_ready` 断言判红 ⇒ `|| true` 保持该语义。
+server_pod_ready() {
+  kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
     -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="pigeonbox")].ready}' 2>/dev/null |
-    grep -q true; then break; fi
-  sleep 3
-done
+    grep -q true
+}
+SHELLKIT_RETRY_DELAY=3 SHELLKIT_RETRY_BACKOFF=1 retry 60 server_pod_ready || true
 new_ready=$(kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
   -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="pigeonbox")].ready}' 2>/dev/null || echo false)
 [ "$new_ready" = true ] || fail "新 server pod 未在 180s 内 Ready"
@@ -101,27 +104,28 @@ new_pod=$(kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
 ok "新 pod $new_pod 已 Ready（旧 $old_pod 已消失）"
 
 # 等 nginx 上游恢复（Service endpoint 指向新 pod）
-for i in $(seq 1 30); do
-  if fcurl http://127.0.0.1:8080/api/config 2>/dev/null | grep -q '"code":0'; then break; fi
-  sleep 2
-done
+# ⚠️ 等价替换：原为「for i in $(seq 1 30) + sleep 2」（最多 60s）⇒ DELAY=2/BACKOFF=1。
+frontend_api_ok() {
+  fcurl http://127.0.0.1:8080/api/config 2>/dev/null | grep -q '"code":0'
+}
+SHELLKIT_RETRY_DELAY=2 SHELLKIT_RETRY_BACKOFF=1 retry 30 frontend_api_ok || true
 fcurl http://127.0.0.1:8080/api/config 2>/dev/null | grep -q '"code":0' ||
   fail "迁移后前端链路未恢复（60s）"
 ok "迁移后前端链路恢复"
 
-echo "══ 3) 核心断言：同一 upload_id 会话存活 ══"
+log_info "══ 3) 核心断言：同一 upload_id 会话存活 ══"
 st_body=$(fcurl "http://127.0.0.1:8080/chunk/upload/status/$UPLOAD_ID")
 echo "$st_body" | grep -q '"uploaded_chunks":2' ||
   fail "迁移后分片会话丢失/位图变化（应=2）: ${st_body:0:200}"
 ok "迁移后 status 仍报 uploaded=2（会话在共享存储，未随旧 pod 消失）"
 
-echo "══ 4) 续传：补片 2（不重新 init） ══"
+log_info "══ 4) 续传：补片 2（不重新 init） ══"
 put_chunk 2 | grep -q '"code":0' || fail "补传片 2 失败"
 st_body=$(fcurl "http://127.0.0.1:8080/chunk/upload/status/$UPLOAD_ID")
 echo "$st_body" | grep -q '"uploaded_chunks":3' || fail "补传后位图应=3: ${st_body:0:200}"
 ok "补传片 2 成功、位图=3（对既有会话续传，未重 init）"
 
-echo "══ 5) complete → 真实分享码 ══"
+log_info "══ 5) complete → 真实分享码 ══"
 cmp_body=$(fcurl -F "expire_value=1" -F "expire_style=day" -F "require_auth=false" \
   "http://127.0.0.1:8080/chunk/upload/complete/$UPLOAD_ID")
 echo "$cmp_body" | grep -q '"code":0' || fail "complete 失败: ${cmp_body:0:200}"
@@ -130,4 +134,4 @@ share_code=$(echo "$cmp_body" | sed -n 's/.*"share_code":"\([^"]*\)".*/\1/p')
   fail "complete 未返回真实 share_code: ${cmp_body:0:200}"
 ok "complete 成功 share_code=${share_code}（跨迁移的分片会话完整闭环）"
 
-echo "✅ 场景③（上传中 Pod 迁移）通过"
+log_ok "✅ 场景③（上传中 Pod 迁移）通过"
