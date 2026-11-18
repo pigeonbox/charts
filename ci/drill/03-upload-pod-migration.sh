@@ -26,7 +26,7 @@ source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 NS="$DRILL_NS"
 REL="$DRILL_RELEASE"
-CHUNK_SIZE=1048576      # 1MB × 3 片（限流 UploadQPS=10，小流量）
+CHUNK_SIZE=1048576 # 1MB × 3 片（限流 UploadQPS=10，小流量）
 TOTAL_CHUNKS=3
 
 # 在 frontend pod 内发 curl（真实用户路径；frontend 不参与迁移）
@@ -88,8 +88,8 @@ kubectl -n "$NS" delete po "$old_pod" --force --grace-period=0 >/dev/null
 ok "已 force-delete ${old_pod}（模拟上传中 Pod 迁移）"
 for i in $(seq 1 60); do
   if kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
-    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="pigeonbox")].ready}' 2>/dev/null \
-    | grep -q true; then break; fi
+    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="pigeonbox")].ready}' 2>/dev/null |
+    grep -q true; then break; fi
   sleep 3
 done
 new_ready=$(kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
@@ -105,14 +105,14 @@ for i in $(seq 1 30); do
   if fcurl http://127.0.0.1:8080/api/config 2>/dev/null | grep -q '"code":0'; then break; fi
   sleep 2
 done
-fcurl http://127.0.0.1:8080/api/config 2>/dev/null | grep -q '"code":0' \
-  || fail "迁移后前端链路未恢复（60s）"
+fcurl http://127.0.0.1:8080/api/config 2>/dev/null | grep -q '"code":0' ||
+  fail "迁移后前端链路未恢复（60s）"
 ok "迁移后前端链路恢复"
 
 echo "══ 3) 核心断言：同一 upload_id 会话存活 ══"
 st_body=$(fcurl "http://127.0.0.1:8080/chunk/upload/status/$UPLOAD_ID")
-echo "$st_body" | grep -q '"uploaded_chunks":2' \
-  || fail "迁移后分片会话丢失/位图变化（应=2）: ${st_body:0:200}"
+echo "$st_body" | grep -q '"uploaded_chunks":2' ||
+  fail "迁移后分片会话丢失/位图变化（应=2）: ${st_body:0:200}"
 ok "迁移后 status 仍报 uploaded=2（会话在共享存储，未随旧 pod 消失）"
 
 echo "══ 4) 续传：补片 2（不重新 init） ══"
@@ -126,8 +126,8 @@ cmp_body=$(fcurl -F "expire_value=1" -F "expire_style=day" -F "require_auth=fals
   "http://127.0.0.1:8080/chunk/upload/complete/$UPLOAD_ID")
 echo "$cmp_body" | grep -q '"code":0' || fail "complete 失败: ${cmp_body:0:200}"
 share_code=$(echo "$cmp_body" | sed -n 's/.*"share_code":"\([^"]*\)".*/\1/p')
-[ -n "$share_code" ] && [ "$share_code" != "$UPLOAD_ID" ] \
-  || fail "complete 未返回真实 share_code: ${cmp_body:0:200}"
+[ -n "$share_code" ] && [ "$share_code" != "$UPLOAD_ID" ] ||
+  fail "complete 未返回真实 share_code: ${cmp_body:0:200}"
 ok "complete 成功 share_code=${share_code}（跨迁移的分片会话完整闭环）"
 
 echo "✅ 场景③（上传中 Pod 迁移）通过"

@@ -45,15 +45,15 @@ echo "══ A) 优雅驱逐：drain 节点 ══"
 # 用 timeout 截断（eviction 动作在卡住前已发生）。
 timeout 45 kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force \
   >/tmp/drill02-drain.log 2>&1 || true
-grep -qE 'drained|Cannot drain' /tmp/drill02-drain.log \
-  && ok "drain 已执行（卡住截断属预期：单节点等 pod 消失）" \
-  || echo "  ⚠️ drain 输出未见 drained 标记，继续按 pod 状态断言"
+grep -qE 'drained|Cannot drain' /tmp/drill02-drain.log &&
+  ok "drain 已执行（卡住截断属预期：单节点等 pod 消失）" ||
+  echo "  ⚠️ drain 输出未见 drained 标记，继续按 pod 状态断言"
 
 # 断言①：业务 pod Pending（无处可去 = 单点脆弱性实证）
 phase=$(kubectl -n "$NS" get po -l app.kubernetes.io/component=server \
   -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo Missing)
-[ "$phase" = Pending ] \
-  || fail "驱逐后 server pod 应为 Pending（无副本可逃），实得 $phase"
+[ "$phase" = Pending ] ||
+  fail "驱逐后 server pod 应为 Pending（无副本可逃），实得 $phase"
 ok "驱逐后 server pod = Pending（单节点无处迁移，脆弱性实证）"
 
 # 断言②：服务断流（无就绪副本）
@@ -64,8 +64,8 @@ ok "节点驱逐期间服务断流（单副本的真实后果）"
 
 echo "══ A-恢复) uncordon → 自愈 ══"
 kubectl uncordon "$NODE" >/dev/null
-kubectl -n "$NS" rollout status deploy/"$REL-pigeonbox" --timeout=180s >/dev/null \
-  || true
+kubectl -n "$NS" rollout status deploy/"$REL-pigeonbox" --timeout=180s >/dev/null ||
+  true
 for i in $(seq 1 30); do
   if api_ok; then break; fi
   sleep 2
@@ -91,12 +91,12 @@ for i in $(seq 1 60); do
   if kubectl get nodes 2>/dev/null | grep -q "$NODE.*Ready"; then break; fi
   sleep 3
 done
-kubectl get nodes 2>/dev/null | grep -q "$NODE.*Ready" \
-  || fail "节点未在 180s 内回 Ready"
+kubectl get nodes 2>/dev/null | grep -q "$NODE.*Ready" ||
+  fail "节点未在 180s 内回 Ready"
 ok "节点回 Ready"
 
-kubectl -n "$NS" rollout status deploy/"$REL-pigeonbox" --timeout=180s >/dev/null \
-  || fail "节点恢复后 server 未回 Ready"
+kubectl -n "$NS" rollout status deploy/"$REL-pigeonbox" --timeout=180s >/dev/null ||
+  fail "节点恢复后 server 未回 Ready"
 for i in $(seq 1 30); do
   if api_ok; then break; fi
   sleep 2
